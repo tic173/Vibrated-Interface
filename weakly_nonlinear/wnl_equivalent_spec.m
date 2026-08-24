@@ -1,0 +1,13 @@
+function tf = wnl_equivalent_spec(a, b)
+%WNL_EQUIVALENT_SPEC True when two fields occupy the same Floquet block.
+
+tol = 256 * eps(max([1, abs(a.s), abs(b.s)]));
+lambdaA = wnl_spec_lambda(a);
+lambdaB = wnl_spec_lambda(b);
+lambdaTol = 1.0e-10 * max([1, abs(lambdaA), abs(lambdaB)]);
+tf = (a.m == b.m) && ...
+    (abs(wnl_wrap_quasifrequency(a.s - b.s)) < tol) && ...
+    (abs(lambdaA-lambdaB) < lambdaTol) && ...
+    isequal(a.n(:), b.n(:)) && ...
+    (a.ndof == b.ndof);
+end

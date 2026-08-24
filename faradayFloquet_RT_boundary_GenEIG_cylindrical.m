@@ -1,4 +1,6 @@
-function [Ac] = faradayFloquet_RT_boundary_GenEIG_cylindrical(omega_star, R0, m, l, C, Bd, At, eta, n, varargin)
+function [Ac, zetaNeutral, diagnostics] = ...
+    faradayFloquet_RT_boundary_GenEIG_cylindrical( ...
+    omega_star, R0, m, l, C, Bd, At, eta, n, varargin)
 % s_star - growth rate
 % omega_star - driving frequence
 % beta_star - wave number
@@ -6,6 +8,7 @@ function [Ac] = faradayFloquet_RT_boundary_GenEIG_cylindrical(omega_star, R0, m,
 
 mode_type       = 'SH';
 g_sign = 1;
+forcing_phase = 0;
 
 
 if nargin >=10
@@ -14,6 +17,10 @@ end
 
 if nargin >=11
     g_sign = varargin{2};
+end
+
+if nargin >=12
+    forcing_phase = varargin{3};
 end
 
  % 
@@ -33,30 +40,51 @@ beta_star = beta_star(l);
 
     if strcmpi(mode_type, 'SH')
         Ln  = 2*(n+1);
-        B   =  full( spdiags([ones(Ln,1) zeros(Ln,1) ones(Ln,1)],-1:1,Ln,Ln));
+        B = vi_floquet_acceleration_matrix(Ln, forcing_phase);
 
         sj = 0.5*1i*omega_star;
      
     elseif strcmpi(mode_type, 'H')
         Ln  =  2*n+1;
-        B   =  full( spdiags([ones(Ln,1) zeros(Ln,1) ones(Ln,1)],-1:1,Ln,Ln));
+        B = vi_floquet_acceleration_matrix(Ln, forcing_phase);
 
         sj = 0;
 
     end
 
-         A0 = FD_RT_coeffs(n,sj,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign);
+    A0 = vi_reduced_cylinder_coefficients(n, sj, beta_star, ...
+        omega_star, At, eta, C, Bd, mode_type, g_sign);
 
 
-         tol = 1e-6;
-    [V,D]   =  eig(diag(A0),B);
-    D1       =  (diag(D));
+    tol = 1e-6;
+    [V, D] = eig(diag(A0), B);
+    eigenvalues = diag(D);
+    nearlyReal = abs(imag(eigenvalues)) < ...
+        tol*max(abs(real(eigenvalues)), 1);
+    admissible = find(nearlyReal & isfinite(eigenvalues) & ...
+        real(eigenvalues) >= 0);
+    if isempty(admissible)
+        error('faradayFloquet_RT_boundary:NoPositiveThreshold', ...
+            ['No finite nonnegative neutral acceleration was found for ', ...
+             'm=%d, l=%d, mode=%s.'], m, l, mode_type);
+    end
+    [Ac, location] = min(real(eigenvalues(admissible)));
+    selectedIndex = admissible(location);
+    zetaNeutral = V(:, selectedIndex);
+    zetaNeutral = zetaNeutral/max(norm(zetaNeutral), eps);
 
-     D       =  real(D1(abs(imag(D1))<tol*abs(real(D1))));
-
-    D       =  sort(D,'ascend','ComparisonMethod','real');
-
-     Ac =  min(D(real(D)>=0));
+    neutralMatrix = diag(A0)-Ac*B;
+    singularValues = svd(neutralMatrix);
+    diagnostics = struct();
+    diagnostics.modeType = mode_type;
+    diagnostics.forcingPhase = forcing_phase;
+    diagnostics.harmonicExponent = sj;
+    diagnostics.eigenvalues = eigenvalues;
+    diagnostics.selectedEigenvalueIndex = selectedIndex;
+    diagnostics.relativeSingularResidual = min(singularValues)/ ...
+        max(max(singularValues), eps);
+    diagnostics.vectorResidual = norm(neutralMatrix*zetaNeutral)/ ...
+        (max(norm(neutralMatrix, 2), eps)*norm(zetaNeutral));
 
 
 end
@@ -121,7 +149,10 @@ end
 
 
 
-function [An] = FD_RT_coeffs(n,s_star,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign)
+function [An] = legacy_FD_RT_coeffs_unused(n,s_star,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign) %#ok<DEFNU>
+% Retained only for source-history comparison. The executable solver uses
+% vi_reduced_cylinder_coefficients so threshold and growth calculations
+% cannot silently diverge.
 
 
 if strcmpi(mode_type, 'SH')
@@ -266,4 +297,3 @@ end
 
 
 end
-

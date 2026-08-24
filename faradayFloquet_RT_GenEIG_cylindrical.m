@@ -1,11 +1,22 @@
-function [s_star,zeta_all,w1,w2,w1p,w2p] = faradayFloquet_RT_GenEIG_cylindrical(Ac, omega_star, R0, m, l, C, Bd, At, eta, n, varargin)
-% s_star - growth rate
-% omega_star - driving frequence
-% beta_star - wave number
-% n - order of expansion
+function [s_star,zeta_all,w1,w2,w1p,w2p,diagnostics] = faradayFloquet_RT_GenEIG_cylindrical(Ac, omega_star, R0, m, l, C, Bd, At, eta, n, varargin)
+%FARADAYFLOQUET_RT_GENEIG_CYLINDRICAL Linear Floquet exponent and mode.
+%
+% s_star is the complex Floquet exponent. real(s_star) is the
+% dimensionless growth rate and imag(s_star) is the modal angular
+% frequency. The optional inputs are
+%   mode_type   'H' or 'SH'
+%   g_sign      signed gravity parameter
+%   s_guess     initial guess for the complex Floquet exponent
+%   phase       phase in cos(omega*t+phase), matching the full operator
+%
+% Velocity fields are reconstructed when 3--6 outputs are requested.
+% Calling with seven outputs returns diagnostics and skips the large z-grid
+% reconstruction; w1, w2, w1p, and w2p are then empty.
 
 mode_type       = 'SH';
 g_sign = 1;
+s_guess = [];
+forcing_phase = 0;
 
 
 if nargin >=11
@@ -14,6 +25,14 @@ end
 
 if nargin >=12
     g_sign = varargin{2};
+end
+
+if nargin >=13
+    s_guess = varargin{3};
+end
+
+if nargin >=14
+    forcing_phase = varargin{4};
 end
 
 
@@ -25,25 +44,23 @@ beta_star = beta_star(l);
 %%  Construct the matrix A
 
 
-[A0] = @(sj) FD_RT_coeffs(n,sj,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign);
+[A0] = @(sj) vi_reduced_cylinder_coefficients(n, sj, beta_star, ...
+    omega_star, At, eta, C, Bd, mode_type, g_sign);
 
 if strcmpi(mode_type, 'SH')
     Ln  = 2*(n+1);
-    B   =  full( spdiags([ones(Ln,1) zeros(Ln,1) ones(Ln,1)],-1:1,Ln,Ln));
-
-    B_sin = 1i*full( spdiags([-1*ones(Ln,1) zeros(Ln,1) 1*ones(Ln,1)],-1:1,Ln,Ln));
+    B = vi_floquet_acceleration_matrix(Ln, forcing_phase);
 
 elseif strcmpi(mode_type, 'H')
     Ln  =  2*n+1;
-    B   =  full( spdiags([ones(Ln,1) zeros(Ln,1) ones(Ln,1)],-1:1,Ln,Ln));
-    B_sin = 1i*full( spdiags([-1*ones(Ln,1) zeros(Ln,1) 1*ones(Ln,1)],-1:1,Ln,Ln));
+    B = vi_floquet_acceleration_matrix(Ln, forcing_phase);
 
 end
 
 
 %%    Solve
 
-fun = @(sj) det((diag(A0(sj))-Ac*B_sin)/20);
+fun = @(sj) det((diag(A0(sj))-Ac*B)/20);
 
 opt=optimset('Maxiter',2000,'TolX',1e-10,'Tolfun',1e-10);
 
@@ -53,7 +70,13 @@ opt=optimset('Maxiter',2000,'TolX',1e-10,'Tolfun',1e-10);
 % s_star = fsolve(@(sj) fun(sj),  1+1*beta_star/2.5-1*beta_star^2*C/2+sqrt(beta_star+C*(beta_star).^3)*1i, opt);
 
  
-   s_star = fsolve(@(sj) fun(sj), 1+1*beta_star/3-1*beta_star^0*C*1+sqrt(beta_star+C*(beta_star).^3*1)*1i*.4, opt);   % m=0
+if isempty(s_guess)
+    s_guess = 1+beta_star/3-C + ...
+        0.4i*sqrt(beta_star+C*beta_star^3);
+end
+validateattributes(s_guess, {'numeric'}, {'scalar', 'finite'});
+[s_star, determinantResidual, exitFlag, solveOutput] = ...
+    fsolve(@(sj) fun(sj), s_guess, opt);
 
   % s_star = fsolve(@(sj) fun(sj), 1+1*beta_star/3-1*beta_star^2*C*1+sqrt(beta_star+C*(beta_star).^3*1)*1i*0.1, opt);
 
@@ -67,9 +90,36 @@ opt=optimset('Maxiter',2000,'TolX',1e-10,'Tolfun',1e-10);
 
 %%   Periodic Harmonic Components
 
-zeta_all  = null((diag(A0(s_star))-Ac*B_sin));
-%
-[w1,w2,w1p,w2p] = FD_RT_BCcoeffs(n,s_star,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign,zeta_all);
+modeMatrix = diag(A0(s_star))-Ac*B;
+singularValues = svd(modeMatrix);
+relativeSingularResidual = min(singularValues) / ...
+    max(max(singularValues), eps);
+zeta_all = null(modeMatrix);
+if isempty(zeta_all)
+    [~, ~, rightVectors] = svd(modeMatrix, 'econ');
+    zeta_all = rightVectors(:, end);
+elseif size(zeta_all, 2) > 1
+    zeta_all = zeta_all(:, 1);
+end
+
+w1 = [];
+w2 = [];
+w1p = [];
+w2p = [];
+diagnostics = struct();
+diagnostics.initialGuess = s_guess;
+diagnostics.determinantResidual = abs(determinantResidual);
+diagnostics.exitFlag = exitFlag;
+diagnostics.solveOutput = solveOutput;
+diagnostics.relativeSingularResidual = relativeSingularResidual;
+diagnostics.singularValues = singularValues;
+diagnostics.acceleration = Ac;
+diagnostics.forcingPhase = forcing_phase;
+
+if nargout >= 3 && nargout <= 6
+    [w1,w2,w1p,w2p] = FD_RT_BCcoeffs(n,s_star,beta_star, ...
+        omega_star,At,eta,C,Bd,mode_type,g_sign,zeta_all);
+end
 
  % w1 = 0; w2 =0; w1p=0;w2p=0; zeta_all=0;
 
@@ -79,7 +129,9 @@ zeta_all  = null((diag(A0(s_star))-Ac*B_sin));
 end
 
 
-function [An] = FD_RT_coeffs(n,s_star,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign)
+function [An] = legacy_FD_RT_coeffs_unused(n,s_star,beta_star,omega_star,At,eta,C,Bd,mode_type,g_sign) %#ok<DEFNU>
+% Retained only for source-history comparison. The executable solver uses
+% vi_reduced_cylinder_coefficients.
 
 
 if strcmpi(mode_type, 'SH')
@@ -390,5 +442,3 @@ end
 
 
 end
-
-

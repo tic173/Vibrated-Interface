@@ -19,20 +19,20 @@ rho        =   997;  % liquid density
 %%% Nondimensionalization
               % [rad/s]
 
- omega      =   30*2*pi;                  % [rad/s]
+ omega      =   60*2*pi;                  % [rad/s]
 omega_star =   omega*tc;
 
 C          =  nu/(sqrt(g*h^3));
 Bd         =  rho*g*h^2/sigma;
 
 
-   % At = 0.9976;
-   % eta = 1.81e-2;
+   At = 0.9976;
+   eta = 1.81e-2;
 
 R0 = R/h;
 
-   At =.5; 
-   eta = 0.3;
+   % At =.5; 
+   % eta = 0.3;
 
 
 
@@ -121,7 +121,7 @@ Nj = 10;
 
 Nm = 4;
 
-Ac=0;
+Ac=4;
 g_sign = -1;
 
 
