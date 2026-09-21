@@ -48,6 +48,11 @@ function model = vi_wnl_model(config, operators)
 %   a vector or a structure with fields vector and diagnostics. The cylinder
 %   implementation exploits the low-rank interface coupling among temporal
 %   harmonics and is checked in the complete unequilibrated equations.
+%
+% operators.solveAdjoint(spec,direct,opts)
+%   Optional model-specific adjoint-null solve. The returned vector is only
+%   accepted after the generic engine checks the complete A'*left residual
+%   and its Bslow pairing with the direct mode.
 
 requiredConfig = {'omega', 'N', 'ndof'};
 requiredOperators = {'B0', 'Lhat', 'C', 'D'};
@@ -86,6 +91,10 @@ end
 if isfield(operators,'solveForced') && ...
         isa(operators.solveForced,'function_handle')
     builder.blockSolve = operators.solveForced;
+end
+if isfield(operators,'solveAdjoint') && ...
+        isa(operators.solveAdjoint,'function_handle')
+    builder.blockAdjointSolve = operators.solveAdjoint;
 end
 model = wnl_fourier_model(builder);
 if isfield(operators, 'CField') && ...

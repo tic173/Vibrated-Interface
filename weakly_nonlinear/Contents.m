@@ -1,4 +1,4 @@
-% Weakly nonlinear Floquet analysis.
+% Weakly nonlinear Floquet analysis (V70 projected real forced-field gate).
 %
 % Model construction
 %   wnl_fourier_model              - Assemble a Fourier descriptor model.
@@ -44,20 +44,41 @@
 %   vi_select_slow_operating_modes      - Select slow branches for two-mode WNL.
 %   vi_compare_interface_dynamics       - Linear/WNL interface reconstruction.
 %   vi_compare_interface_dynamics_modes - One/two-mode interface reconstruction.
+%   vi_radial_mode_correction          - Project full harmonics into Bessel carrier plus c_n(r).
+%   vi_plot_radial_mode_corrections    - Visualize harmonic radial corrections.
+%   vi_plot_bessel_corrected_structure - Compare Bessel and corrected planforms.
 %   vi_comparison_time_indices          - Select the transient comparison window.
 %   vi_cubic_transient_correction       - Finite-time O(A^3) correction to linear growth.
 %   vi_saved_small_amplitude_transient  - Fast saved-coefficient transient postprocessor.
 %   vi_mode_initial_conditions          - Validate modal initial amplitudes/phases.
 %   vi_resolve_analysis_amplitude       - Select an absolute forcing amplitude.
 %   vi_cylinder_radial_grid             - Bessel-enriched radial operators.
+%   vi_prolong_cylinder_mode_radially   - Interpolate a full mode onto a refined radial grid.
+%   vi_prolong_cylinder_mode            - Interpolate a full mode onto new radial and vertical grids.
 %   vi_multidomain_chebyshev_grid       - Piecewise Chebyshev grid and maps.
 %   vi_cylinder_vertical_grid           - Automatic/explicit cylinder z grid.
 %   examples/vi_wnl_user_run_full_cylinder
 %                                       - Physical WNL run and comparisons.
+%   examples/vi_run_60hz_complete_cubic_cases
+%                                       - Strict complete 60 Hz coefficient runs.
+%   examples/vi_run_60hz_m2_radial_refinement
+%                                       - Two-mode 60 Hz radial-grid audit.
+%   examples/vi_run_60hz_m2l9_self_convergence
+%   examples/vi_run_60hz_mixed_m0l9_m2l2
+%                                       - Mixed 60 Hz strict radial audit.
+%                                       - Focused high-resolution g11 audit.
+%   examples/vi_package_60hz_coefficients
+%                                       - Compact audited 60 Hz coefficient package.
 %   vi_wnl_apply_runtime_profile         - Development/balanced/final presets.
 %   vi_wnl_apply_recovery_cache          - Validated direct/adjoint restart.
 %   vi_save_output_record                - Robust absolute MAT-file saving.
+%   vi_compact_output_record             - Compact restart/postprocessing records.
+%   vi_compact_saved_output              - Convert an existing full MAT cache.
 %
 % Verification
 %   wnl_demo_stuart_landau         - Analytic coefficient test.
+%   vi_verify_g21_numerics         - Targeted pressure-gauge/step sweep for g21.
 %   run_wnl_tests                  - Run all module tests.
+%   benchmark_radial_mode_correction - Small real-cylinder wall/c_n smoke test.
+%   benchmark_forced_radial_mode_correction_sweep
+%                                  - Forced m/l Floquet and c_n sweep.

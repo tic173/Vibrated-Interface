@@ -23,6 +23,19 @@ opts.directLiftMaxRestarts = 3;
 opts.directLiftSeedResidualTolerance = 5.0e-6;
 opts.modeTrackingMinimumConstraint = 1.0e-8;
 opts.adjointBorderedMaxRestarts = 3;
+% Prefer a model-specific adjoint solve when one is available. The cylinder
+% implementation eliminates full temporal blocks through their low-rank
+% interface coupling; wnl_compute_mode still checks A'*left in full.
+opts.adjointUseModelSolver = true;
+% Equal-order primitive collocation can leave pressure-only null vectors in
+% every uncoupled temporal block. The cylinder Schur adjoint removes only
+% those directions with a minimum-norm SVD border before eliminating the
+% block. The complete, unmodified Floquet adjoint residual is still checked.
+opts.adjointCylinderSchurUseNullspaceBordering = true;
+opts.adjointCylinderSchurNullTolerance = 1.0e-12;
+opts.adjointCylinderSchurMaximumNullity = 8;
+opts.adjointCylinderSchurBlockRefinementSteps = 2;
+opts.adjointCylinderSchurFactorResidualTolerance = 1.0e-8;
 opts.adjointUseBlockGmres = true;
 opts.adjointGmresRestart = 30;
 opts.adjointGmresMaxCycles = 120;
@@ -85,11 +98,23 @@ opts.forcedUseRankAwareMinimumNorm = true;
 opts.forcedRankToleranceFactors = [1.0e-2,1.0e-4];
 opts.forcedTryDefaultRankTolerance = false;
 opts.forcedColumnEquilibrationFloorRatio = 1.0e-14;
+% Direct sparse QR inside LSQMINNORM can require a dense-sized workspace
+% for very large Floquet blocks. Above this dimension use iterative LSQR
+% with the same column equilibration and physical-residual selection.
+opts.forcedDirectMinimumNormMaxDimension = 1.0e5;
 % The cylinder's vibration blocks couple neighboring temporal harmonics only
 % through a small set of interface-displacement columns. Eliminate the full
 % primitive-variable blocks and solve the resulting small temporal Schur
 % system before falling back to a global minimum-norm calculation.
 opts.forcedUseCylinderSchur = true;
+% Select the primitive temporal-block factor. Column-only QR preserves the
+% original least-squares equation norm and is robust to pressure-dominated
+% numerical rank loss; equilibrated LU is faster on well-conditioned grids.
+opts.forcedCylinderSchurFactorMethod = 'equilibratedLu';
+% Equilibrate each exact primitive-variable temporal block before LU. This
+% changes coordinates only; reconstructed fields are always tested in the
+% original unequilibrated equations.
+opts.forcedCylinderSchurUseEquilibratedBlocks = true;
 opts.forcedCylinderSchurBlockRefinementSteps = 2;
 opts.forcedCylinderSchurReducedRefinementSteps = 2;
 % If an exact temporal block is singular, the model-specific Schur solve
@@ -100,6 +125,20 @@ opts.forcedCylinderSchurBlockRegularization = 1.0e-12;
 opts.forcedCylinderSchurBlockRegularizationGrowth = 10.0;
 opts.forcedCylinderSchurBlockRegularizationAttempts = 5;
 opts.forcedCylinderSchurBlockMaximumInverseGain = 1.0e12;
+% Equal-order primitive-variable collocation can leave pressure-only null
+% vectors in an otherwise valid temporal block. Complete only those vectors
+% with minimum-norm borders before considering a diagonal regularization.
+opts.forcedCylinderSchurUseNullspaceBordering = true;
+opts.forcedCylinderSchurNullTolerance = 1.0e-12;
+opts.forcedCylinderSchurMaximumNullity = 8;
+% Equal-order m=0 blocks contain certified pressure-only null vectors. A
+% least-squares field can therefore miss the unprojected equations solely
+% in the corresponding redundant compatibility directions. When enabled,
+% accept against the residual in the pressure quotient while retaining and
+% bounding the removed residual separately. Nonaxisymmetric blocks and
+% uncertified nullspaces always use the complete residual.
+opts.forcedCylinderSchurUsePressureCompatibilityProjection = false;
+opts.forcedCylinderSchurPressureCompatibilityTolerance = 1.0e-5;
 % The older temporal-block GMRES path remains available as an optional
 % seed generator, but is disabled by default: for the full two-mode
 % cylinder it can spend thousands of Krylov iterations before the same
@@ -114,7 +153,22 @@ opts.forcedBlockRegularization = 1.0e-6;
 opts.forcedBlockRegularizationGrowth = 10.0;
 opts.forcedBlockRegularizationAttempts = 5;
 opts.forcedBlockMaximumInverseGain = 1.0e10;
+% Diagnostic/production escape hatch for very large models: retain only the
+% model-specific forced candidate and skip global minimum-norm/refinement
+% fallbacks. A missed full residual gate remains invalid and triggers the
+% ordinary coefficient fail-fast policy.
+opts.forcedModelSolverOnly = false;
+% Long LSQR corrections often sit at the pressure compatibility floor for
+% all 10,000 iterations. Work in bounded chunks and stop only after repeated
+% chunks fail to improve the original physical residual materially.
+opts.forcedRefinementChunkIterations = 1000;
+opts.forcedRefinementStagnationChunks = 2;
+opts.forcedRefinementMinimumChunkImprovement = 1.0e-3;
 opts.reuseTwoModeForcedFields = true;
+% Empty evaluates the complete coefficient matrix. An N-by-2 array of
+% [target,source] indices evaluates only those entries, which is useful for
+% convergence and invariance checks of one suspicious coefficient.
+opts.coefficientPairs = [];
 opts.refineOperatingPointEigenpair = true;
 opts.eigenpairRefinementTolerance = 1.0e-9;
 opts.eigenpairRefinementMaxSteps = 8;
@@ -178,6 +232,21 @@ opts.autoEscalateEigenpairRefinement = true;
 opts.eigenpairEscalationMaxSteps = 8;
 opts.eigenpairEscalationMaximumResidualRatio = 1.0e4;
 opts.coefficientModeResidualTolerance = 1.0e-8;
+% Axisymmetric harmonic/subharmonic branches with a real Floquet exponent
+% are one-dimensional real eigenspaces. Numerical recovery may leave a tiny
+% imaginary exponent and phase defect; project such a mode onto its physical
+% self-conjugate representative before evaluating nonlinear products.
+opts.realModeEigenvalueTolerance = 1.0e-4;
+opts.realModeMinimumConjugateOverlap = 0.99;
+% Real quadratic and cubic responses are projected onto the exact fixed
+% point of physical conjugation. Reject the coefficient if the unprojected
+% field is too far from that subspace; projection must remain a numerical
+% cleanup, not a repair of a physically inconsistent solve.
+opts.realFieldConjugacyTolerance = 1.0e-5;
+% A coefficient in a real modal equation must itself be real. This gate is
+% applied after explicit self-conjugate projection and catches broken
+% conjugation bookkeeping or an inadequately resolved nonlinear action.
+opts.realCoefficientImaginaryTolerance = 1.0e-7;
 opts.enforceReducedFullEigenvalueAgreement = true;
 opts.maximumReducedFullEigenvalueRelativeMismatch = 0.05;
 opts.maximumReducedFullEigenvalueAbsoluteMismatch = 1.0e-3;

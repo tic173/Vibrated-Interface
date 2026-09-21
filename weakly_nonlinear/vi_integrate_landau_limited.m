@@ -1,4 +1,5 @@
-function result = vi_integrate_landau_limited(timeRequested, A0, lambda, g, maximumAmplitude)
+function result = vi_integrate_landau_limited(timeRequested, A0, lambda, ...
+        g, maximumAmplitude, phaseSensitiveG)
 %VI_INTEGRATE_LANDAU_LIMITED Integrate only inside the WNL amplitude range.
 % Stops cleanly when max_j |A_j| reaches maximumAmplitude.  Returned times
 % are a prefix of timeRequested, so linear and nonlinear records stay aligned.
@@ -11,7 +12,11 @@ end
 validateattributes(maximumAmplitude, {'numeric'}, ...
     {'scalar','real','positive','finite'});
 A0 = A0(:);
-rhs = @(t,A) wnl_rhs_landau(t, A, lambda, g);
+if nargin < 6 || isempty(phaseSensitiveG)
+    phaseSensitiveG = complex(zeros(size(g)));
+end
+rhs = @(t,A) wnl_rhs_landau( ...
+    t,A,lambda,g,phaseSensitiveG);
 events = @(t,A) amplitude_event(t, A, maximumAmplitude);
 odeOptions = odeset('RelTol', 1.0e-8, 'AbsTol', 1.0e-11, ...
     'Events', events);
@@ -39,6 +44,7 @@ result.stoppedAtAmplitudeLimit = ~isempty(tEvent);
 result.stopTime = lastTime;
 result.maximumAmplitude = maximumAmplitude;
 result.maximumReachedAmplitude = max(abs(ARaw(:)));
+result.phaseSensitiveG = phaseSensitiveG;
 end
 
 function [value, isterminal, direction] = amplitude_event(~, A, limit)

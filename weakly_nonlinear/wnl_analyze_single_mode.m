@@ -10,6 +10,19 @@ modeWallClock = tic;
 mode = wnl_compute_mode(model, spec, opts);
 modeSeconds = toc(modeWallClock);
 modeBar = wnl_conjugate_mode(model, mode, opts);
+coordinateType = wnl_mode_coordinate_type( ...
+    mode,opts.realModeEigenvalueTolerance, ...
+    opts.realModeMinimumConjugateOverlap);
+realCoordinateProjection = struct('applied',false);
+if strcmp(coordinateType,'real')
+    [mode,realCoordinateProjection] = ...
+        wnl_enforce_real_mode(model,mode,modeBar,opts);
+    modeBar = wnl_conjugate_mode(model,mode,opts);
+    modeBar.coordinateType = 'real';
+else
+    mode.coordinateType = 'complex';
+    modeBar.coordinateType = 'complex';
+end
 wnl_assert_mode_converged(mode, opts);
 wnl_assert_mode_converged(modeBar, opts);
 % Establish that the full mode still represents the reduced operating-point
@@ -37,13 +50,15 @@ self = wnl_self_coefficient(model, mode, modeBar, ...
 selfCoefficientSeconds = toc(selfWallClock);
 
 mu = NaN;
+muReality = struct();
 detuningForcing = [];
 if isfield(model, 'detuning') && isa(model.detuning, 'function_handle') ...
         && ~isempty(opts.detuning)
     detuningForcing = model.detuning(mode.field, ...
         opts.detuning, mode.spec);
-    mu = (mode.left' * detuningForcing(:)) / ...
+    rawMu = (mode.left' * detuningForcing(:)) / ...
         mode.normalization;
+    [mu,muReality] = wnl_project_modal_coefficient(rawMu,mode,opts);
 end
 
 result = struct();
@@ -57,6 +72,15 @@ else
 end
 result.mu = mu;
 result.g = self.g;
+result.gPhysicalPeak = wnl_physical_cubic_coefficients( ...
+    self.g,{mode});
+result.coordinateType = coordinateType;
+result.amplitudeScaleToPeakZetaOverH = ...
+    wnl_mode_amplitude_scale(mode);
+result.realCoordinateProjection = realCoordinateProjection;
+result.detuningCoefficientReality = muReality;
+result.coefficientConventionVersion = ...
+    'V2-real-self-conjugate-physical-peak';
 result.self = self;
 result.detuningForcing = detuningForcing;
 result.validCubicScaling = self.validCubicScaling;

@@ -1,0 +1,119 @@
+function result = wnl_real_self_coefficient( ...
+        model, mode, neutralModes, userOpts)
+%WNL_REAL_SELF_COEFFICIENT Cubic coefficient for one real signed mode.
+%
+% With q=A*phi+A^2*q_AA+..., A is real and
+%   A(2*lambda) q_AA = C(phi,phi),
+%   g = <psi,2*C(phi,q_AA)+D(phi,phi,phi)>.
+% There is no separate conjugate mean field for a self-conjugate mode.
+
+if nargin < 3 || isempty(neutralModes)
+    neutralModes = {mode};
+end
+if nargin < 4
+    userOpts = struct();
+end
+opts = wnl_options(userOpts);
+
+specAA = wnl_combine_spec(model,{mode.spec,mode.spec},[1,1], ...
+    [mode.spec.label,'_AA']);
+forcingAA = wnl_apply_quadratic(model,mode.field,mode.field,specAA);
+qAA = wnl_solve_forced(model,specAA,forcingAA,neutralModes,opts);
+forcedSolvesValid = qAA.valid;
+forcedSolvesExploratoryUsable = forced_field_usable(qAA);
+
+if ~forcedSolvesValid && opts.stopOnUnconvergedForcedSolve
+    result = base_result();
+    result.validCubicScaling = false;
+    result.forcedSolvesValid = false;
+    result.forcedSolvesExploratoryUsable = false;
+    result.qAA = qAA;
+    result.message = ['The required real O(A^2) forced field failed ', ...
+        'the forcing-relative residual gate. The cubic coefficient is ', ...
+        'withheld.'];
+    return;
+end
+if qAA.quadraticResonance && opts.stopOnQuadraticResonance
+    result = base_result();
+    result.validCubicScaling = false;
+    result.quadraticResonance = true;
+    result.qAA = qAA;
+    result.message = ['The real self-product is quadratically resonant. ', ...
+        'A quadratic amplitude term is required.'];
+    return;
+end
+
+[qAAField,qAAReality] = ...
+    wnl_project_self_conjugate_forced_solution(model,qAA,opts);
+termSecond = 2.0*wnl_apply_quadratic( ...
+    model,mode.field,qAAField,mode.spec);
+termDirect = wnl_apply_cubic( ...
+    model,mode.field,mode.field,mode.field,mode.spec);
+[termSecondField,termSecondReality] = ...
+    wnl_project_self_conjugate_field(model, ...
+    wnl_make_field(mode.spec,termSecond),opts);
+[termDirectField,termDirectReality] = ...
+    wnl_project_self_conjugate_field(model, ...
+    wnl_make_field(mode.spec,termDirect),opts);
+termSecond = termSecondField.coeff;
+termDirect = termDirectField.coeff;
+cubicForcing = termSecond+termDirect;
+[forcingField,forcingReality] = wnl_project_self_conjugate_field( ...
+    model,wnl_make_field(mode.spec,cubicForcing),opts);
+cubicForcing = forcingField.coeff;
+rawG = (mode.left'*cubicForcing(:))/mode.normalization;
+[g,reality] = wnl_project_modal_coefficient(rawG,mode,opts);
+
+result = base_result();
+result.validCubicScaling = ~qAA.quadraticResonance && ...
+    forcedSolvesValid && qAAReality.accepted && ...
+    termSecondReality.accepted && termDirectReality.accepted && ...
+    forcingReality.accepted && reality.accepted;
+result.quadraticResonance = qAA.quadraticResonance;
+result.forcedSolvesValid = forcedSolvesValid;
+result.forcedSolvesExploratoryUsable = forcedSolvesExploratoryUsable;
+result.g = g;
+result.gUnprojected = rawG;
+result.coefficientReality = reality;
+result.qAA = qAA;
+result.termSecondHarmonic = termSecond;
+result.termDirectCubic = termDirect;
+result.cubicForcing = cubicForcing;
+result.fieldReality = struct('qAA',qAAReality, ...
+    'termSecondHarmonic',termSecondReality, ...
+    'termDirectCubic',termDirectReality, ...
+    'cubicForcing',forcingReality);
+if ~reality.accepted
+    result.message = sprintf([ ...
+        'A real modal coefficient had imaginary part %.3e, above the ', ...
+        'allowed %.3e. The coefficient was withheld.'], ...
+        abs(imag(rawG)),reality.allowedImaginaryPart);
+elseif ~qAAReality.accepted || ~termSecondReality.accepted || ...
+        ~termDirectReality.accepted || ~forcingReality.accepted
+    result.message = sprintf([ ...
+        'A real forced field had conjugacy defect %.3e, above the ', ...
+        'allowed %.3e. The coefficient was withheld.'], ...
+        max([qAAReality.relativeDefect,termSecondReality.relativeDefect, ...
+        termDirectReality.relativeDefect,forcingReality.relativeDefect]), ...
+        opts.realFieldConjugacyTolerance);
+end
+end
+
+function result = base_result()
+result = struct('validCubicScaling',true,'g',NaN, ...
+    'gUnprojected',NaN,'qAA',[],'qAbarA',[], ...
+    'termMean',[],'termSecondHarmonic',[], ...
+    'termDirectCubic',[],'cubicForcing',[],'message','', ...
+    'quadraticResonance',false,'forcedSolvesValid',true, ...
+    'forcedSolvesExploratoryUsable',true, ...
+    'coordinateConvention','real-self-conjugate', ...
+    'coefficientReality',struct(),'fieldReality',struct());
+end
+
+function tf = forced_field_usable(solution)
+tf = isstruct(solution) && isfield(solution,'valid') && ...
+    logical(solution.valid);
+if isstruct(solution) && isfield(solution,'exploratoryUsable')
+    tf = logical(solution.exploratoryUsable);
+end
+end

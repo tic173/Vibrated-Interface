@@ -30,6 +30,15 @@ nr = numerics.Nr;
 validateattributes(nr, {'numeric'}, ...
     {'scalar', 'integer', '>=', 6});
 
+if isfield(numerics, 'pressureGaugeRadialIndex') && ...
+        ~isempty(numerics.pressureGaugeRadialIndex)
+    pressureGaugeRadialIndex = numerics.pressureGaugeRadialIndex;
+else
+    pressureGaugeRadialIndex = max(2, min(nr-1, ceil(nr/2)));
+end
+validateattributes(pressureGaugeRadialIndex, {'numeric'}, ...
+    {'scalar', 'integer', '>=', 2, '<=', nr-1, 'finite'});
+
 if isfield(numerics, 'Ntheta')
     ntheta = numerics.Ntheta;
 else
@@ -88,6 +97,13 @@ if ~ismember(contactLine, {'free', 'pinned'})
     error('vi_cylinder_wnl_discretization:ContactLine', ...
         'boundary.contactLine must be ''free'' or ''pinned''.');
 end
+sidewallTangentialCondition = 'legacyFreeSlide';
+if isfield(parameters, 'boundary') && ...
+        isfield(parameters.boundary, 'sidewallTangentialCondition')
+    sidewallTangentialCondition = validatestring( ...
+        parameters.boundary.sidewallTangentialCondition, ...
+        {'legacyFreeSlide','stressFree'});
+end
 
 rhoD = 1;
 rhoL = (1-parameters.At)/(1+parameters.At);
@@ -112,18 +128,32 @@ discretization.verticalD = verticalD;
 discretization.verticalL = verticalL;
 discretization.denseGaugeVerticalIndex = ...
     gauge_vertical_index(verticalD, -0.5);
+discretization.denseGaugeRadialIndex = pressureGaugeRadialIndex;
 discretization.ntheta = ntheta;
 discretization.quadraticStep = quadraticStep;
 discretization.cubicStep = cubicStep;
 discretization.contactLine = contactLine;
+discretization.sidewallTangentialCondition = ...
+    sidewallTangentialCondition;
 discretization.rhoD = rhoD;
 discretization.rhoL = rhoL;
 discretization.muD = muD;
 discretization.muL = muL;
 discretization.hAtwood = hAtwood;
 discretization.ndof = layout.ndof;
-discretization.sidewallConditions = ...
-    {'u_r=0', 'd_r(r*u_theta)=0', 'd_r(w)=0'};
+if strcmp(sidewallTangentialCondition,'stressFree')
+    discretization.sidewallConditions = ...
+        {'u_r=0', 'R*d_r(u_theta)-u_theta=0', 'd_r(w)=0'};
+    discretization.linearOperatorVersion = ...
+        'V3-pressure-compatible-stress-free-sidewall';
+else
+    discretization.sidewallConditions = ...
+        {'u_r=0', 'd_r(r*u_theta)=0', 'd_r(w)=0'};
+    discretization.linearOperatorVersion = ...
+        'V2-pressure-compatible-sidewall';
+end
+discretization.pressureBoundaryTreatment = ...
+    'normal momentum compatibility in the pressure row';
 discretization.useParallelNonlinearActions = false;
 discretization.reportTiming = false;
 discretization.nonlinearTemporalOversampling = 2.0;
@@ -136,6 +166,7 @@ discretization.nonlinearTemporalOversampling = 2.0;
 discretization.adaptiveDirectionalSteps = true;
 discretization.quadraticStepMultipliers = [1,2,4,8];
 discretization.cubicStepMultipliers = [1,2,4];
+discretization.directionalStepEarlyStopTolerance = 1.0e-8;
 if isfield(parameters,'execution')
     if isfield(parameters.execution,'useParallelNonlinearActions')
         discretization.useParallelNonlinearActions = logical( ...
@@ -161,11 +192,17 @@ if isfield(parameters,'execution')
         discretization.cubicStepMultipliers = ...
             parameters.execution.cubicStepMultipliers;
     end
+    if isfield(parameters.execution,'directionalStepEarlyStopTolerance')
+        discretization.directionalStepEarlyStopTolerance = ...
+            parameters.execution.directionalStepEarlyStopTolerance;
+    end
 end
 validateattributes(discretization.nonlinearTemporalOversampling, ...
     {'numeric'},{'scalar','real','>=',1,'finite'});
 validateattributes(discretization.adaptiveDirectionalSteps, ...
     {'logical'},{'scalar'});
+validateattributes(discretization.directionalStepEarlyStopTolerance, ...
+    {'numeric'},{'scalar','real','nonnegative','finite'});
 discretization.quadraticStepMultipliers = validate_step_multipliers( ...
     discretization.quadraticStepMultipliers,'quadraticStepMultipliers');
 discretization.cubicStepMultipliers = validate_step_multipliers( ...

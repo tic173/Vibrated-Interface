@@ -3,12 +3,12 @@ function [operators, metadata] = cylinder_wnl_operators(parameters)
 %
 % This factory discretizes the same model used by the reduced linear code:
 % two viscous layers of nondimensional depth one, no slip at z=+/-1,
-% legacy free-slide sidewall velocity conditions, full velocity and stress
-% continuity at z=zeta, and either a free (d_r zeta=0) or pinned (zeta=0)
-% contact line. One or more matched Chebyshev elements may be used in each
-% vertical layer. The primitive variables and incompressibility constraint
-% are retained, so bulk and boundary nonlinear forcing enter the adjoint
-% solvability projection.
+% selectable legacy free-slide or true cylindrical stress-free sidewall
+% conditions, full velocity and stress continuity at z=zeta, and either a
+% free (d_r zeta=0) or pinned (zeta=0) contact line. One or more matched
+% Chebyshev elements may be used in each vertical layer. The primitive
+% variables and incompressibility constraint are retained, so bulk and
+% boundary nonlinear forcing enter the adjoint solvability projection.
 
 discretization = vi_cylinder_wnl_discretization(parameters);
 blockCache = containers.Map('KeyType', 'char', 'ValueType', 'any');
@@ -22,6 +22,7 @@ operators.CField = @quadratic_field_callback;
 operators.DField = @cubic_field_callback;
 operators.P = @detuning_callback;
 operators.solveForced = @forced_solve_callback;
+operators.solveAdjoint = @adjoint_solve_callback;
 operators.conjugateAdjointRows = @conjugate_adjoint_rows_callback;
 operators.nonlinearFourierShifts = [-1, 0, 1];
 
@@ -30,12 +31,31 @@ metadata.ndof = discretization.ndof;
 metadata.discretization = discretization;
 metadata.layout = discretization.layout;
 metadata.contactLine = discretization.contactLine;
+metadata.sidewallTangentialCondition = ...
+    discretization.sidewallTangentialCondition;
 metadata.sidewallConditions = discretization.sidewallConditions;
+metadata.pressureBoundaryTreatment = ...
+    'sidewall normal momentum stored in the pressure equation row';
+metadata.pressureGauge = struct( ...
+    'radialIndex',discretization.denseGaugeRadialIndex, ...
+    'verticalIndex',discretization.denseGaugeVerticalIndex, ...
+    'rOverR0',discretization.r( ...
+        discretization.denseGaugeRadialIndex)/parameters.R0, ...
+    'layer','dense');
+metadata.linearOperatorVersion = discretization.linearOperatorVersion;
+metadata.adjointSolverVersion = ...
+    'V2-pressure-nullspace-bordered-temporal-schur';
 metadata.radialGrid = discretization.radial;
 metadata.verticalGrid.lower = discretization.verticalD;
 metadata.verticalGrid.upper = discretization.verticalL;
 metadata.normalizeDirect = @normalize_direct_mode;
-metadata.zetaOverHPerUnitAmplitude = 1.0;
+metadata.complexCarrierPeakPerUnitInternalAmplitude = 1.0;
+metadata.amplitudeNormalization = [ ...
+    'physical peak zeta/h uses scale 1 for a self-conjugate real mode ', ...
+    'and scale 2 for a distinct complex/conjugate pair'];
+metadata.nonlinearSidewallMapping = [ ...
+    'free-line metric terms vanish because d_r(zeta)=0; pinned-line ', ...
+    'tangential rows retain their ALE radial-derivative corrections'];
 metadata.description = [ ...
     'Primitive-variable optionally Bessel-enriched radial / multi-domain ', ...
     'Chebyshev vertical / Fourier ALE discretization with the linear ', ...
@@ -109,6 +129,13 @@ metadata.description = [ ...
         result = vi_cylinder_wnl_forced_schur_solve( ...
             blocks,discretization.parameters.omegaStar, ...
             spec,forcing,opts);
+    end
+
+    function result = adjoint_solve_callback(spec,direct,opts)
+        blocks = get_blocks(spec.m);
+        result = vi_cylinder_wnl_adjoint_schur_solve( ...
+            blocks,discretization.parameters.omegaStar, ...
+            spec,direct,opts);
     end
 
     function blocks = get_blocks(m)

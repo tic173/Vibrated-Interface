@@ -18,6 +18,12 @@ if nargin < 7 || isempty(precomputed)
     precomputed = struct();
 end
 opts = wnl_options(userOpts);
+if strcmp(wnl_mode_coordinate_type( ...
+        modeB,opts.realModeEigenvalueTolerance),'real')
+    result = wnl_real_source_cross_coefficient( ...
+        model,modeA,modeB,neutralModes,opts,precomputed);
+    return;
+end
 reused = struct('qBbarB',false,'qAbarB',false,'qAB',false);
 
 specBbarB = wnl_combine_spec(model, ...
@@ -129,15 +135,19 @@ termSum = 2.0 * wnl_apply_quadratic(model, ...
 termDirect = 6.0 * wnl_apply_cubic(model, ...
     modeA.field, modeB.field, modeBBar.field, modeA.spec);
 forcing = termMean + termDifference + termSum + termDirect;
-g = (modeA.left' * forcing(:)) / modeA.normalization;
+rawG = (modeA.left' * forcing(:)) / modeA.normalization;
+[g,reality] = wnl_project_modal_coefficient(rawG,modeA,opts);
 
 result = base_result();
-result.validCubicScaling = ~quadraticResonance && forcedSolvesValid;
+result.validCubicScaling = ~quadraticResonance && forcedSolvesValid && ...
+    reality.accepted;
 result.quadraticResonance = quadraticResonance;
 result.forcedSolvesValid = forcedSolvesValid;
 result.forcedSolvesExploratoryUsable = ...
     forcedSolvesExploratoryUsable;
 result.g = g;
+result.gUnprojected = rawG;
+result.coefficientReality = reality;
 result.qBbarB = qBbarB;
 result.qAbarB = qAbarB;
 result.qAB = qAB;
@@ -148,12 +158,19 @@ result.termSum = termSum;
 result.termDirectCubic = termDirect;
 result.cubicForcing = forcing;
 result.message = '';
+if ~reality.accepted
+    result.message = sprintf([ ...
+        'A real target coefficient had imaginary part %.3e, above the ', ...
+        'allowed %.3e. The coefficient was withheld.'], ...
+        abs(imag(rawG)),reality.allowedImaginaryPart);
+end
 end
 
 function result = base_result()
 result = struct();
 result.validCubicScaling = true;
 result.g = NaN;
+result.gUnprojected = NaN;
 result.qBbarB = [];
 result.qAbarB = [];
 result.qAB = [];
@@ -168,6 +185,8 @@ result.forcedSolvesValid = true;
 result.forcedSolvesExploratoryUsable = true;
 result.reusedForcedFields = struct('qBbarB',false, ...
     'qAbarB',false,'qAB',false);
+result.coordinateConvention = 'complex-source';
+result.coefficientReality = struct();
 end
 
 function tf = forced_field_stops_branch(solution,opts)

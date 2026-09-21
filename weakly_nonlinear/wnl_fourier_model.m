@@ -39,6 +39,10 @@ function model = wnl_fourier_model(config)
 %   nonresonant Floquet block. result may be a vector or a structure with
 %   fields vector and diagnostics. Every caller still checks A*result-f.
 %
+% config.blockAdjointSolve
+%   Optional model-specific adjoint-null solve. The generic mode engine
+%   validates its complete A'*left residual and descriptor pairing.
+%
 % The assembled direct operator is
 %   A_{n,n'} = [lambda+i*omega*(n+s)]*B0*delta_{n,n'} - L_{n-n'}.
 % lambda=0 gives the original neutral-point formulation.  A nonzero lambda
@@ -58,6 +62,11 @@ model.config = config;
 model.makeSpec = @(m, s, label) ...
     wnl_spec(m, s, config.N, config.ndof, label);
 model.block = @(spec) assemble_block(config, spec);
+if isfield(config,'blockSolve') && isa(config.blockSolve,'function_handle')
+    model.solveForced = @(forcing,spec,opts) ...
+        config.blockSolve(spec,forcing,opts);
+    model.slowBlock = @(spec) assemble_slow_block(config,spec);
+end
 
 if isfield(config, 'quadraticLocal') && ...
         isa(config.quadraticLocal, 'function_handle')
@@ -120,12 +129,26 @@ end
 
 block = struct();
 block.A = A;
-block.Bslow = kron(speye(nt), sparse(b0));
+block.Bslow = assemble_slow_block(config,spec);
 block.spec = spec;
 if isfield(config,'blockSolve') && isa(config.blockSolve,'function_handle')
     block.solve = @(forcing,requestedSpec,opts) ...
         config.blockSolve(requestedSpec,forcing,opts);
 end
+if isfield(config,'blockAdjointSolve') && ...
+        isa(config.blockAdjointSolve,'function_handle')
+    block.solveAdjoint = @(direct,requestedSpec,opts) ...
+        config.blockAdjointSolve(requestedSpec,direct,opts);
+end
+end
+
+function Bslow = assemble_slow_block(config,spec)
+b0 = get_mass(config,spec);
+if ~isequal(size(b0),[config.ndof,config.ndof])
+    error('wnl_fourier_model:BadMass', ...
+        'The descriptor matrix has the wrong size.');
+end
+Bslow = kron(speye(numel(spec.n)),sparse(b0));
 end
 
 function coeffOut = apply_detuning(config, field, direction, specOut)

@@ -17,6 +17,8 @@ function [specs, information] = vi_wnl_apply_recovery_cache( ...
 information = struct('requested',true,'used',false,'valid',false, ...
     'warmStarted',false, ...
     'file','','reason','','sourceCodeRelease','', ...
+    'sourceLinearOperatorVersion','', ...
+    'sourceAdjointSolverVersion','', ...
     'numberOfModes',0,'labels',{{}});
 if nargin < 1 || isempty(cacheFile)
     information.reason = 'no recovery-cache file was specified';
@@ -45,6 +47,22 @@ cachedOutput = loaded.output;
 if isfield(cachedOutput,'codeRelease')
     information.sourceCodeRelease = cachedOutput.codeRelease;
 end
+currentLinearOperatorVersion = expected_linear_operator_version(input);
+if isfield(cachedOutput,'operatorMetadata') && ...
+        isfield(cachedOutput.operatorMetadata,'linearOperatorVersion')
+    information.sourceLinearOperatorVersion = ...
+        cachedOutput.operatorMetadata.linearOperatorVersion;
+end
+operatorVersionMatches = strcmp( ...
+    information.sourceLinearOperatorVersion,currentLinearOperatorVersion);
+currentAdjointSolverVersion = expected_adjoint_solver_version();
+if isfield(cachedOutput,'operatorMetadata') && ...
+        isfield(cachedOutput.operatorMetadata,'adjointSolverVersion')
+    information.sourceAdjointSolverVersion = ...
+        cachedOutput.operatorMetadata.adjointSolverVersion;
+end
+adjointVersionMatches = strcmp( ...
+    information.sourceAdjointSolverVersion,currentAdjointSolverVersion);
 
 [compatible,reason] = compatible_run( ...
     cachedOutput,input,parameters,ndof);
@@ -64,9 +82,9 @@ if numel(cachedModes) < numel(specs)
         numel(cachedModes),numel(specs));
     return;
 end
+labels = cell(numel(specs),1);
 
 strictTolerance = input.options.coefficientModeResidualTolerance;
-labels = cell(numel(specs),1);
 cachedModesPassStrictGate = true(numel(specs),1);
 for modeIndex = 1:numel(specs)
     cachedMode = cachedModes{modeIndex};
@@ -79,6 +97,7 @@ for modeIndex = 1:numel(specs)
         return;
     end
     cachedModesPassStrictGate(modeIndex) = ...
+        operatorVersionMatches && adjointVersionMatches && ...
         cached_mode_passes_gate(cachedMode,strictTolerance);
 end
 
@@ -86,9 +105,24 @@ if ~all(cachedModesPassStrictGate)
     for modeIndex = 1:numel(specs)
         cachedMode = cachedModes{modeIndex};
         currentSpec = specs{modeIndex};
-        reducedReferenceLambda = wnl_spec_lambda(currentSpec);
-        currentSpec.lambda = wnl_spec_lambda(cachedMode.spec);
-        currentSpec.reducedReferenceLambda = reducedReferenceLambda;
+        hasReducedReference = isfield(currentSpec, ...
+            'reducedReferenceLambda') && ...
+            ~isempty(currentSpec.reducedReferenceLambda);
+        if hasReducedReference
+            reducedReferenceLambda = ...
+                currentSpec.reducedReferenceLambda;
+        end
+        useExactReducedExponent = hasReducedReference && ...
+            isfield(currentSpec,'exactSeparableBesselInterface') && ...
+            logical(currentSpec.exactSeparableBesselInterface);
+        if useExactReducedExponent
+            currentSpec.lambda = reducedReferenceLambda;
+        else
+            currentSpec.lambda = wnl_spec_lambda(cachedMode.spec);
+        end
+        if hasReducedReference
+            currentSpec.reducedReferenceLambda = reducedReferenceLambda;
+        end
         currentSpec.directLiftInitialVector = cachedMode.vector(:);
         currentSpec.recoveryWarmStartFile = resolvedFile;
         currentSpec.recoveryCacheCodeRelease = ...
@@ -98,10 +132,30 @@ if ~all(cachedModesPassStrictGate)
     end
     information.valid = true;
     information.warmStarted = true;
-    information.reason = sprintf([ ...
-        'matching incomplete recovery supplied as a warm start; ', ...
-        'strict-ready modes %d/%d'], ...
-        nnz(cachedModesPassStrictGate),numel(specs));
+    if operatorVersionMatches && adjointVersionMatches
+        information.reason = sprintf([ ...
+            'matching incomplete recovery supplied as a warm start; ', ...
+            'strict-ready modes %d/%d'], ...
+            nnz(cachedModesPassStrictGate),numel(specs));
+    elseif ~operatorVersionMatches
+        sourceVersion = information.sourceLinearOperatorVersion;
+        if isempty(sourceVersion)
+            sourceVersion = 'legacy/unspecified';
+        end
+        information.reason = sprintf([ ...
+            'linear operator changed from %s to %s; matching saved ', ...
+            'vectors are supplied only as recovery warm starts'], ...
+            sourceVersion,currentLinearOperatorVersion);
+    else
+        sourceVersion = information.sourceAdjointSolverVersion;
+        if isempty(sourceVersion)
+            sourceVersion = 'legacy/unspecified';
+        end
+        information.reason = sprintf([ ...
+            'adjoint solver changed from %s to %s; saved direct vectors ', ...
+            'are supplied only as recovery warm starts'], ...
+            sourceVersion,currentAdjointSolverVersion);
+    end
     information.numberOfModes = numel(specs);
     information.labels = labels;
     return;
@@ -110,11 +164,18 @@ end
 for modeIndex = 1:numel(specs)
     cachedMode = cachedModes{modeIndex};
     currentSpec = specs{modeIndex};
-    reducedReferenceLambda = wnl_spec_lambda(currentSpec);
+    hasReducedReference = isfield(currentSpec, ...
+        'reducedReferenceLambda') && ...
+        ~isempty(currentSpec.reducedReferenceLambda);
+    if hasReducedReference
+        reducedReferenceLambda = currentSpec.reducedReferenceLambda;
+    end
     currentSpec.direct = cachedMode.vector(:);
     currentSpec.left = cachedMode.left(:);
     currentSpec.lambda = wnl_spec_lambda(cachedMode.spec);
-    currentSpec.reducedReferenceLambda = reducedReferenceLambda;
+    if hasReducedReference
+        currentSpec.reducedReferenceLambda = reducedReferenceLambda;
+    end
     currentSpec.recoveryCacheFile = resolvedFile;
     currentSpec.recoveryCacheCodeRelease = ...
         information.sourceCodeRelease;
@@ -127,6 +188,25 @@ information.valid = true;
 information.reason = 'validated cached modes supplied to the current blocks';
 information.numberOfModes = numel(specs);
 information.labels = labels;
+end
+
+function version = expected_linear_operator_version(input)
+sidewallCondition = 'legacyFreeSlide';
+if isfield(input,'boundary') && ...
+        isfield(input.boundary,'sidewallTangentialCondition')
+    sidewallCondition = validatestring( ...
+        input.boundary.sidewallTangentialCondition, ...
+        {'legacyFreeSlide','stressFree'});
+end
+if strcmp(sidewallCondition,'stressFree')
+    version = 'V3-pressure-compatible-stress-free-sidewall';
+else
+    version = 'V2-pressure-compatible-sidewall';
+end
+end
+
+function version = expected_adjoint_solver_version()
+version = 'V2-pressure-nullspace-bordered-temporal-schur';
 end
 
 function tf = cached_mode_passes_gate(mode,tolerance)
@@ -166,12 +246,13 @@ end
 
 savedInput = output.input;
 if ~isfield(savedInput,'numerics') || ...
-        ~isequaln(savedInput.numerics,input.numerics)
+        ~same_numerics(savedInput.numerics,input.numerics)
     reason = 'spatial, azimuthal, or Floquet discretization changed';
     return;
 end
 if ~isfield(savedInput,'boundary') || ...
-        ~isequaln(savedInput.boundary,input.boundary)
+        (~isequaln(savedInput.boundary,input.boundary) && ...
+        ~axisymmetric_sidewall_warm_start_compatible(savedInput,input))
     reason = 'boundary/contact-line model changed';
     return;
 end
@@ -203,6 +284,37 @@ if ~isfield(savedInput,'run') || ...
     return;
 end
 compatible = true;
+end
+
+function tf = axisymmetric_sidewall_warm_start_compatible(savedInput,input)
+% The two tangential-wall formulas differ only in the u_theta row. For a
+% free-line m=0 branch u_theta is identically zero, so changing only this wall
+% selector does not change the physical axisymmetric mode. The caller still
+% treats an operator-version mismatch as a warm start and rechecks residuals.
+tf = false;
+if ~isfield(savedInput,'modes') || ~isfield(input,'modes') || ...
+        isempty(input.modes) || numel(savedInput.modes) ~= numel(input.modes)
+    return;
+end
+if any([savedInput.modes.m] ~= 0) || any([input.modes.m] ~= 0)
+    return;
+end
+savedBoundary = savedInput.boundary;
+currentBoundary = input.boundary;
+if ~isfield(savedBoundary,'contactLine') || ...
+        ~isfield(currentBoundary,'contactLine') || ...
+        ~strcmpi(savedBoundary.contactLine,'free') || ...
+        ~strcmpi(currentBoundary.contactLine,'free')
+    return;
+end
+if isfield(savedBoundary,'sidewallTangentialCondition')
+    savedBoundary = rmfield(savedBoundary,'sidewallTangentialCondition');
+end
+if isfield(currentBoundary,'sidewallTangentialCondition')
+    currentBoundary = rmfield(currentBoundary, ...
+        'sidewallTangentialCondition');
+end
+tf = isequaln(savedBoundary,currentBoundary);
 end
 
 function [modes,reason] = extract_modes(output)
@@ -277,6 +389,29 @@ if ~tf
 end
 scale = max([1;abs(a(:));abs(b(:))]);
 tf = all(abs(a(:)-b(:)) <= 1.0e-12*scale);
+end
+
+function tf = same_numerics(a,b)
+% An empty referenceModes field is the explicit spelling of the legacy
+% retained-mode default; it does not change the radial operator.
+a = remove_empty_reference_modes(a);
+b = remove_empty_reference_modes(b);
+tf = isequaln(a,b);
+end
+
+function value = remove_empty_reference_modes(value)
+if isstruct(value) && isfield(value,'radialGrid') && ...
+        isstruct(value.radialGrid) && ...
+        isfield(value.radialGrid,'referenceModes') && ...
+        isempty(value.radialGrid.referenceModes)
+    value.radialGrid = rmfield(value.radialGrid,'referenceModes');
+end
+if isstruct(value) && isfield(value,'radialGrid') && ...
+        isstruct(value.radialGrid) && ...
+        isfield(value.radialGrid,'preferredBasisLabels') && ...
+        isempty(value.radialGrid.preferredBasisLabels)
+    value.radialGrid = rmfield(value.radialGrid,'preferredBasisLabels');
+end
 end
 
 function resolved = resolve_cache_file(fileName,repositoryRoot)

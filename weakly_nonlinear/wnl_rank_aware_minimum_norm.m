@@ -1,5 +1,5 @@
 function [x, information] = wnl_rank_aware_minimum_norm( ...
-        A,b,Bslow,userOpts)
+        A,b,Bslow,userOpts,initialX)
 %WNL_RANK_AWARE_MINIMUM_NORM Solve a forced block without hiding rank loss.
 %
 % The primitive-variable cylinder operator mixes velocity, interface,
@@ -21,12 +21,28 @@ end
 if nargin < 4
     userOpts = struct();
 end
+if nargin < 5 || isempty(initialX)
+    initialX = complex(zeros(size(A,2),1));
+end
 opts = wnl_options(userOpts);
 
 validateattributes(opts.forcedRankToleranceFactors,{'numeric'}, ...
     {'vector','real','positive','finite'});
 validateattributes(opts.forcedColumnEquilibrationFloorRatio,{'numeric'}, ...
     {'scalar','real','positive','<=',1,'finite'});
+validateattributes(opts.forcedDirectMinimumNormMaxDimension,{'numeric'}, ...
+    {'scalar','integer','positive','finite'});
+validateattributes(opts.forcedRefinementChunkIterations,{'numeric'}, ...
+    {'scalar','integer','positive','finite'});
+validateattributes(opts.forcedRefinementStagnationChunks,{'numeric'}, ...
+    {'scalar','integer','positive','finite'});
+validateattributes(opts.forcedRefinementMinimumChunkImprovement, ...
+    {'numeric'},{'scalar','real','nonnegative','<',1,'finite'});
+if numel(initialX) ~= size(A,2)
+    error('wnl_rank_aware_minimum_norm:InitialSize', ...
+        'The initial candidate has %d entries; expected %d.', ...
+        numel(initialX),size(A,2));
+end
 
 scale = max(norm(b),eps);
 [equilibratedA,columnScale] = equilibrate_columns( ...
@@ -52,6 +68,15 @@ selectedAttempt = 0;
 attempt = 0;
 
 useDenseSvd = max(size(equilibratedA)) <= opts.fullSvdMax;
+useDirectMinimumNorm = ~useDenseSvd && ...
+    max(size(equilibratedA)) <= ...
+    opts.forcedDirectMinimumNormMaxDimension && ...
+    exist('lsqminnorm','file') == 2;
+iterativeCandidate = initialX(:)./columnScale;
+if any(~isfinite(real(iterativeCandidate))) || ...
+        any(~isfinite(imag(iterativeCandidate)))
+    iterativeCandidate = complex(zeros(size(equilibratedA,2),1));
+end
 if useDenseSvd
     [u,s,v] = svd(full(equilibratedA),'econ');
     singularValues = diag(s);
@@ -64,12 +89,20 @@ for toleranceIndex = 1:numel(tolerances)
         scaledCandidate = truncated_svd_solution( ...
             u,singularValues,v,b,tolerance);
         method = 'column-equilibrated SVD';
-    elseif exist('lsqminnorm','file') == 2
+    elseif useDirectMinimumNorm
         scaledCandidate = lsqminnorm(equilibratedA,b,tolerance);
         method = 'column-equilibrated lsqminnorm';
     else
-        scaledCandidate = equilibratedA\b;
-        method = 'column-equilibrated backslash';
+        [scaledCandidate,iterativeInformation] = ...
+            physical_chunked_lsqr(equilibratedA,b, ...
+            iterativeCandidate,tolerance,A,columnScale,scale,opts);
+        iterativeCandidate = scaledCandidate;
+        method = sprintf( ...
+            ['column-equilibrated chunked LSQR ', ...
+             '(flag %d, iterations %d, chunks %d)'], ...
+            iterativeInformation.flag, ...
+            iterativeInformation.iterations, ...
+            iterativeInformation.chunks);
     end
     candidate = columnScale.*scaledCandidate;
     [x,bestResidual,bestRatio,selectedAttempt,passed] = ...
@@ -85,14 +118,11 @@ for toleranceIndex = 1:numel(tolerances)
     if passed.residual <= opts.forcedSolveResidualTolerance
         break;
     end
-    if ~useDenseSvd && exist('lsqminnorm','file') ~= 2
-        break;
-    end
 end
 
 if bestResidual > opts.forcedSolveResidualTolerance && ...
         opts.forcedTryDefaultRankTolerance && ...
-        exist('lsqminnorm','file') == 2
+        useDirectMinimumNorm
     attempt = attempt+1;
     scaledCandidate = lsqminnorm(equilibratedA,b);
     candidate = columnScale.*scaledCandidate;
@@ -141,6 +171,52 @@ else
     information.stopReason = ...
         'no finite rank-aware least-squares candidate was available';
 end
+end
+
+function [bestCandidate,information] = physical_chunked_lsqr( ...
+        scaledA,b,initialCandidate,tolerance,physicalA,columnScale, ...
+        physicalScale,opts)
+current = initialCandidate;
+bestCandidate = current;
+bestResidual = norm(physicalA*(columnScale.*current)-b) / ...
+    physicalScale;
+totalIterations = 0;
+chunks = 0;
+stagnantChunks = 0;
+lastFlag = 1;
+while totalIterations < opts.forcedSolveMaxIterations
+    chunkLimit = min(opts.forcedRefinementChunkIterations, ...
+        opts.forcedSolveMaxIterations-totalIterations);
+    previousBest = bestResidual;
+    [trial,lastFlag,~,iteration] = lsqr( ...
+        scaledA,b,tolerance,chunkLimit,[],[],current);
+    chunks = chunks+1;
+    totalIterations = totalIterations+iteration;
+    trialResidual = norm(physicalA*(columnScale.*trial)-b) / ...
+        physicalScale;
+    if isfinite(trialResidual) && trialResidual < bestResidual
+        bestCandidate = trial;
+        bestResidual = trialResidual;
+    end
+    current = trial;
+    relativeImprovement = (previousBest-bestResidual) / ...
+        max(previousBest,eps);
+    if relativeImprovement < ...
+            opts.forcedRefinementMinimumChunkImprovement
+        stagnantChunks = stagnantChunks+1;
+    else
+        stagnantChunks = 0;
+    end
+    if bestResidual <= opts.forcedSolveResidualTolerance || ...
+            stagnantChunks >= opts.forcedRefinementStagnationChunks || ...
+            iteration < chunkLimit
+        break;
+    end
+end
+information = struct('flag',lastFlag,'iterations',totalIterations, ...
+    'chunks',chunks,'physicalResidual',bestResidual, ...
+    'stagnated',stagnantChunks >= ...
+        opts.forcedRefinementStagnationChunks);
 end
 
 function scaledCandidate = truncated_svd_solution( ...

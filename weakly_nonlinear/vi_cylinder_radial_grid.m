@@ -3,18 +3,21 @@ function grid = vi_cylinder_radial_grid(parameters)
 %
 % The Bessel-enriched option keeps Chebyshev--Lobatto evaluation nodes but
 % replaces polynomial differentiation by differentiation in a problem-
-% adapted radial space. The mandatory space contains, for every retained
-% mode, J_m(beta*r) and the J_|m+/-1|(beta*r) functions carried by the
-% horizontal velocity. Quadratic products and regular polynomials complete
-% the square interpolation basis. This differentiates the selected linear
-% Bessel branches analytically while preserving the existing pointwise ALE
-% nonlinear residual.
+% adapted radial space. By default the mandatory space follows the retained
+% modes. Setting numerics.radialGrid.referenceModes instead freezes that
+% space across several reductions: it contains J_m(beta*r) and the
+% J_|m+/-1|(beta*r) functions carried by every reference mode. Quadratic
+% products and regular polynomials complete the square interpolation basis.
+% This differentiates the selected linear Bessel branches analytically while
+% preserving the existing pointwise ALE nonlinear residual and prevents a
+% companion mode from silently changing another mode's discrete operator.
 
 numerics = parameters.numerics;
 validateattributes(numerics.Nr, {'numeric'}, ...
     {'scalar', 'integer', '>=', 6});
 nr = numerics.Nr;
-[r, chebyshevD] = vi_chebyshev_lobatto(nr, [0, parameters.R0]);
+[r, chebyshevD, quadratureWeights] = ...
+    vi_chebyshev_lobatto(nr, [0, parameters.R0]);
 
 options = default_options();
 if isfield(numerics, 'radialGrid') && ~isempty(numerics.radialGrid)
@@ -28,9 +31,14 @@ requestedType = validatestring(options.type, ...
     {'chebyshev', 'besselEnriched'});
 
 if strcmp(requestedType, 'chebyshev')
-    grid = chebyshev_grid(r, chebyshevD, requestedType);
+    grid = chebyshev_grid( ...
+        r,chebyshevD,quadratureWeights,requestedType);
     return;
 end
+[basisModes,basisModeSource] = resolved_basis_modes( ...
+    parameters,options.referenceModes);
+basisParameters = parameters;
+basisParameters.modes = basisModes;
 
 validateattributes(options.maximumProductOrder, {'numeric'}, ...
     {'scalar', 'integer', '>=', 1, '<=', 3});
@@ -48,15 +56,16 @@ end
 
 try
     [values, first, second, labels, numberOfMandatory] = ...
-        candidate_library(parameters, r, options.maximumProductOrder);
+        candidate_library(basisParameters, r, options.maximumProductOrder);
     if numberOfMandatory > nr
         error('vi_cylinder_radial_grid:TooFewRadialPoints', ...
             ['Nr=%d is smaller than the %d mandatory constant/Bessel ', ...
              'functions. Increase Nr or retain fewer target modes.'], ...
             nr, numberOfMandatory);
     end
-    selected = select_independent_columns(values, numberOfMandatory, ...
-        nr, options.independenceTolerance);
+    selected = select_independent_columns(values, labels, ...
+        numberOfMandatory,nr,options.independenceTolerance, ...
+        options.preferredBasisLabels);
     selectedValues = values(:, selected);
     selectedFirst = first(:, selected);
     selectedSecond = second(:, selected);
@@ -83,6 +92,7 @@ try
 
     grid = struct();
     grid.r = r;
+    grid.quadratureWeights = quadratureWeights;
     grid.D = sparse(Dr);
     grid.D2 = sparse(Drr);
     grid.typeRequested = requestedType;
@@ -94,6 +104,10 @@ try
     grid.firstDerivativeBasisResidual = firstResidual;
     grid.secondDerivativeBasisResidual = secondResidual;
     grid.maximumProductOrder = options.maximumProductOrder;
+    grid.preferredBasisLabels = cellstr(options.preferredBasisLabels);
+    grid.basisModeSource = basisModeSource;
+    grid.basisModes = basisModes;
+    grid.modeSetIndependent = strcmp(basisModeSource,'referenceModes');
     grid.fallbackReason = '';
 catch basisError
     isExpectedBasisFailure = strncmp(basisError.identifier, ...
@@ -106,7 +120,8 @@ catch basisError
     warning('vi_cylinder_radial_grid:BesselFallback', ...
         ['Bessel-enriched differentiation was rejected: %s ', ...
          'Using the Chebyshev radial operator.'], basisError.message);
-    grid = chebyshev_grid(r, chebyshevD, requestedType);
+    grid = chebyshev_grid( ...
+        r,chebyshevD,quadratureWeights,requestedType);
     grid.fallbackReason = basisError.message;
 end
 end
@@ -117,11 +132,14 @@ options.maximumProductOrder = 2;
 options.maximumConditionNumber = 1.0e10;
 options.independenceTolerance = 1.0e-10;
 options.fallbackToChebyshev = true;
+options.referenceModes = [];
+options.preferredBasisLabels = {};
 end
 
-function grid = chebyshev_grid(r, D, requestedType)
+function grid = chebyshev_grid(r, D, quadratureWeights, requestedType)
 grid = struct();
 grid.r = r;
+grid.quadratureWeights = quadratureWeights;
 grid.D = sparse(D);
 grid.D2 = sparse(D*D);
 grid.typeRequested = requestedType;
@@ -133,7 +151,53 @@ grid.conditionNumber = NaN;
 grid.firstDerivativeBasisResidual = NaN;
 grid.secondDerivativeBasisResidual = NaN;
 grid.maximumProductOrder = 0;
+grid.basisModeSource = 'modeIndependent';
+grid.basisModes = struct([]);
+grid.modeSetIndependent = true;
 grid.fallbackReason = '';
+end
+
+function [modes,source] = resolved_basis_modes(parameters,referenceModes)
+if isempty(referenceModes)
+    if ~isfield(parameters,'modes') || isempty(parameters.modes)
+        error('vi_cylinder_radial_grid:MissingModes', ...
+            ['parameters.modes or ', ...
+             'parameters.numerics.radialGrid.referenceModes is required ', ...
+             'for Bessel-enriched radial differentiation.']);
+    end
+    modes = parameters.modes;
+    source = 'retainedModes';
+else
+    if ~isstruct(referenceModes)
+        error('vi_cylinder_radial_grid:BadReferenceModes', ...
+            'radialGrid.referenceModes must be a structure array.');
+    end
+    modes = referenceModes;
+    source = 'referenceModes';
+end
+for modeIndex = 1:numel(modes)
+    mode = modes(modeIndex);
+    if ~isfield(mode,'m')
+        error('vi_cylinder_radial_grid:MissingAzimuthalOrder', ...
+            'Every radial-basis mode requires m.');
+    end
+    validateattributes(mode.m,{'numeric'}, ...
+        {'scalar','integer','nonnegative','finite'});
+    if isfield(mode,'betaStar') && ~isempty(mode.betaStar)
+        beta = mode.betaStar;
+    elseif isfield(mode,'radialIndex') && ~isempty(mode.radialIndex)
+        validateattributes(mode.radialIndex,{'numeric'}, ...
+            {'scalar','integer','positive','finite'});
+        roots = bessel_derivative_root(mode.m,mode.radialIndex);
+        beta = roots(mode.radialIndex)/parameters.R0;
+    else
+        error('vi_cylinder_radial_grid:MissingBeta', ...
+            'Every radial-basis mode requires betaStar or radialIndex.');
+    end
+    validateattributes(beta,{'numeric'}, ...
+        {'scalar','real','positive','finite'});
+    modes(modeIndex).betaStar = beta;
+end
 end
 
 function [values, first, second, labels, numberOfMandatory] = ...
@@ -254,13 +318,42 @@ end
 end
 
 function selected = select_independent_columns( ...
-    values, numberOfMandatory, numberToSelect, tolerance)
+    values,labels,numberOfMandatory,numberToSelect,tolerance, ...
+    preferredLabels)
 selected = 1:numberOfMandatory;
 available = (numberOfMandatory+1):size(values, 2);
 if numerical_rank(values(:, selected), tolerance) < numberOfMandatory
     error('vi_cylinder_radial_grid:DependentMandatoryBasis', ...
         ['The mandatory constant/Bessel functions are linearly dependent ', ...
          'on this radial grid. Change Nr.']);
+end
+if isstring(preferredLabels)
+    preferredLabels = cellstr(preferredLabels);
+end
+if ~iscell(preferredLabels)
+    error('vi_cylinder_radial_grid:BadPreferredBasis', ...
+        'radialGrid.preferredBasisLabels must be a cell array of labels.');
+end
+for preferredIndex = 1:numel(preferredLabels)
+    if numel(selected) >= numberToSelect
+        break;
+    end
+    label = char(preferredLabels{preferredIndex});
+    candidateIndex = find(strcmp(labels,label),1);
+    if isempty(candidateIndex)
+        error('vi_cylinder_radial_grid:MissingPreferredBasis', ...
+            'Preferred radial basis function is unavailable: %s',label);
+    end
+    if ismember(candidateIndex,selected)
+        continue;
+    end
+    trial = [selected,candidateIndex];
+    if numerical_rank(values(:,trial),tolerance) <= numel(selected)
+        error('vi_cylinder_radial_grid:DependentPreferredBasis', ...
+            'Preferred radial basis function is dependent: %s',label);
+    end
+    selected = trial;
+    available(available == candidateIndex) = [];
 end
 while numel(selected) < numberToSelect
     normalizedSelected = normalize_columns(values(:, selected));

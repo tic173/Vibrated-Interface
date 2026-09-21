@@ -11,6 +11,15 @@ function action = vi_cylinder_wnl_nonlinear_action(order, ...
 % incompressibility and kinematics, nonlinear surface traction geometry,
 % capillarity, and vibration acting on the tilted interface normal.
 
+% With no arguments, return the instantaneous nonlinear-remainder callback:
+%   Rnl = callback(d,stateVector,totalTimeDerivative,m,tau).
+% Add B0*stateTime-L(tau)*state to obtain the complete discrete residual.
+% This shares the exact remainder used by C/D; it is not a cubic truncation.
+if nargin == 0
+    action = @instantaneous_remainder;
+    return;
+end
+
 validateattributes(order, {'numeric'}, ...
     {'scalar', 'integer', '>=', 2, '<=', 3});
 if ~iscell(vectors)
@@ -90,19 +99,39 @@ end
 useParallel = d.useParallelNonlinearActions && ...
     license('test','Distrib_Computing_Toolbox') && ...
     ~isempty(gcp('nocreate'));
+temporalSamples = [];
+if ~useParallel
+    temporalSamples = precompute_temporal_samples(d,fields,tauValues);
+end
+earlyStopTolerance = 1.0e-8;
+if isfield(d,'directionalStepEarlyStopTolerance')
+    earlyStopTolerance = d.directionalStepEarlyStopTolerance;
+end
 rawActions = cell(numel(stepMultipliers),1);
+numberOfComputedSteps = 0;
 for stepIndex = 1:numel(stepMultipliers)
     step = baseStep*stepMultipliers(stepIndex);
     [rawActions{stepIndex},parallelStepCompleted] = ...
         field_level_action_at_step( ...
-        order,d,fields,specOut,step,tauValues,useParallel);
+        order,d,fields,specOut,step,tauValues,useParallel,temporalSamples);
+    numberOfComputedSteps = stepIndex;
     if useParallel && ~parallelStepCompleted
         % A process pool can expire during a long preceding recovery or a
         % worker can abort under memory pressure. The failed step was
         % recomputed serially; keep later steps serial as well.
         useParallel = false;
     end
+    if stepIndex >= 3 && stepIndex < numel(stepMultipliers) && ...
+            earlyStopTolerance > 0
+        [~,trialDiagnostics] = select_directional_action( ...
+            rawActions(1:stepIndex),stepMultipliers(1:stepIndex));
+        if trialDiagnostics.relativeDisagreement <= earlyStopTolerance
+            break;
+        end
+    end
 end
+rawActions = rawActions(1:numberOfComputedSteps);
+stepMultipliers = stepMultipliers(1:numberOfComputedSteps);
 [action,stepDiagnostics] = select_directional_action( ...
     rawActions,stepMultipliers);
 if d.reportTiming
@@ -123,7 +152,7 @@ end
 end
 
 function [action,parallelCompleted] = field_level_action_at_step( ...
-        order,d,fields,specOut,step,tauValues,useParallel)
+        order,d,fields,specOut,step,tauValues,useParallel,temporalSamples)
 ntau = numel(tauValues);
 action = complex(zeros(d.ndof,numel(specOut.n)));
 parallelCompleted = false;
@@ -133,7 +162,7 @@ if useParallel
     try
         parfor tauIndex = 1:ntau
             contribution = field_level_tau_contribution(order,d,fields, ...
-                specOut,step,tauValues(tauIndex),ntau);
+                specOut,step,tauValues(tauIndex),ntau,[],tauIndex);
             action = action+contribution;
         end
         parallelCompleted = true;
@@ -148,7 +177,20 @@ if useParallel
 end
 for tauIndex = 1:ntau
     action = action+field_level_tau_contribution(order,d,fields, ...
-        specOut,step,tauValues(tauIndex),ntau);
+        specOut,step,tauValues(tauIndex),ntau,temporalSamples,tauIndex);
+end
+end
+
+function samples = precompute_temporal_samples(d,fields,tauValues)
+samples.spatial = cell(numel(fields),1);
+samples.time = cell(numel(fields),1);
+for fieldIndex = 1:numel(fields)
+    frequency = fields{fieldIndex}.spec.n(:)+fields{fieldIndex}.spec.s;
+    phase = exp(1i*frequency*tauValues);
+    samples.spatial{fieldIndex} = fields{fieldIndex}.coeff*phase;
+    samples.time{fieldIndex} = fields{fieldIndex}.coeff * ...
+        ((wnl_spec_lambda(fields{fieldIndex}.spec)+ ...
+        1i*d.parameters.omegaStar*frequency).*phase);
 end
 end
 
@@ -204,17 +246,26 @@ tf = all(isfinite(real(value(:)))) && ...
 end
 
 function contribution = field_level_tau_contribution( ...
-        order,d,fields,specOut,step,tau,ntau)
+        order,d,fields,specOut,step,tau,ntau,temporalSamples,tauIndex)
 spatialVectors = cell(order,1);
 timeVectors = cell(order,1);
-for fieldIndex = 1:order
-    frequency = fields{fieldIndex}.spec.n(:)+ ...
-        fields{fieldIndex}.spec.s;
-    phase = exp(1i*frequency*tau);
-    spatialVectors{fieldIndex} = fields{fieldIndex}.coeff*phase;
-    timeVectors{fieldIndex} = fields{fieldIndex}.coeff * ...
-        ((wnl_spec_lambda(fields{fieldIndex}.spec)+ ...
-        1i*d.parameters.omegaStar*frequency).*phase);
+if isempty(temporalSamples)
+    for fieldIndex = 1:order
+        frequency = fields{fieldIndex}.spec.n(:)+ ...
+            fields{fieldIndex}.spec.s;
+        phase = exp(1i*frequency*tau);
+        spatialVectors{fieldIndex} = fields{fieldIndex}.coeff*phase;
+        timeVectors{fieldIndex} = fields{fieldIndex}.coeff * ...
+            ((wnl_spec_lambda(fields{fieldIndex}.spec)+ ...
+            1i*d.parameters.omegaStar*frequency).*phase);
+    end
+else
+    for fieldIndex = 1:order
+        spatialVectors{fieldIndex} = ...
+            temporalSamples.spatial{fieldIndex}(:,tauIndex);
+        timeVectors{fieldIndex} = ...
+            temporalSamples.time{fieldIndex}(:,tauIndex);
+    end
 end
 gravity = d.parameters.g_sgn+d.parameters.aCritical * ...
     cos(tau+d.parameters.phase);
@@ -245,6 +296,27 @@ else
 end
 outputPhase = exp(-1i*(specOut.n+specOut.s)*tau)/ntau;
 contribution = nonlinearSnapshot*outputPhase;
+end
+
+function residual = instantaneous_remainder(d,state,stateTime,m,tau)
+validateattributes(state,{'numeric'},{'vector','numel',d.ndof,'finite'});
+validateattributes(stateTime,{'numeric'},{'vector','numel',d.ndof,'finite'});
+validateattributes(m,{'numeric'},{'scalar','integer','finite'});
+validateattributes(tau,{'numeric'},{'scalar','real','finite'});
+field = struct('spec',struct('m',m));
+gravity = d.parameters.g_sgn+d.parameters.aCritical* ...
+    cos(tau+d.parameters.phase);
+useFullTheta=isfield(d,'residualUseFullThetaGrid') && ...
+    d.residualUseFullThetaGrid;
+if m==0 && ~useFullTheta
+    % An axisymmetric snapshot has identically zero azimuthal derivatives.
+    % A single angular sample evaluates the same nonlinear equations.
+    residual=complete_residual_coefficient(d,unpack_coefficient(d,state), ...
+        unpack_coefficient(d,stateTime),0,0,gravity,false);
+    return;
+end
+residual = snapshot_residual(d,{state(:)},{stateTime(:)}, ...
+    {field},1,m,gravity);
 end
 
 function residual = snapshot_residual(d, spatialVectors, timeVectors, ...
@@ -395,9 +467,23 @@ tractionThetaCoefficient = fourier_project( ...
 tractionZCoefficient = fourier_project(tractionZ, theta, mOut);
 kinematicCoefficient = fourier_project(kinematic, theta, mOut);
 
-% Linear boundary rows have exactly zero quadratic and cubic derivatives.
-% Set those rows to zero before replacing the interior interface rows.
+% Most boundary rows have exactly zero quadratic and cubic derivatives.
+% Clear them first, then restore the pinned-line ALE sidewall remainders.
 residual = zero_linear_boundary_rows(residual, d, mOut);
+if ~forcingOnly
+    residual = impose_sidewall_normal_momentum_remainder( ...
+        residual,coefficientD,layout.d,layout.nzD,layout.nr);
+    residual = impose_sidewall_normal_momentum_remainder( ...
+        residual,coefficientL,layout.l,layout.nzL,layout.nr);
+end
+if ~forcingOnly && strcmp(d.contactLine,'pinned')
+    residual = impose_pinned_sidewall_remainder( ...
+        residual,d,state.d,d.DzD,derivativesD.geometry, ...
+        layout.d,layout.nzD,theta,mOut);
+    residual = impose_pinned_sidewall_remainder( ...
+        residual,d,state.l,d.DzL,derivativesL.geometry, ...
+        layout.l,layout.nzL,theta,mOut);
+end
 for ir = 2:layout.nr-1
     nodeD = grid_index(ir, layout.nzD, layout.nr);
     nodeL = grid_index(ir, 1, layout.nr);
@@ -420,6 +506,33 @@ end
 % shape explicit and guard against accidental theta-grid leakage.
 residual = reshape(residual, d.ndof, 1);
 assert(numel(residual) == d.ndof && ntheta >= 1);
+end
+
+function residual = impose_sidewall_normal_momentum_remainder( ...
+        residual,coefficient,layer,nz,nr)
+% The pressure row at the sidewall carries normal-momentum compatibility;
+% its nonlinear action is therefore the radial-momentum remainder.
+for iz = 1:nz
+    side = grid_index(nr,iz,nr);
+    residual(layer.p(side)) = coefficient.ur(end,iz);
+end
+end
+
+function residual = impose_pinned_sidewall_remainder( ...
+        residual,d,state,Dz,geometry,layer,nz,theta,mOut)
+% The mapped radial derivative is
+% d_r|_physical = d_r|_mapped-chi*zeta_r/J*d_z. For a free contact line
+% zeta_r=0 makes either supported tangential sidewall model exactly linear.
+% A pinned line fixes zeta itself, not its slope, so the metric terms remain.
+deltaUtR = nonlinear_r_derivative(d,Dz,geometry,state.ut);
+deltaWR = nonlinear_r_derivative(d,Dz,geometry,state.w);
+utCoefficient = fourier_project(d.r(end)*deltaUtR,theta,mOut);
+wCoefficient = fourier_project(deltaWR,theta,mOut);
+for iz = 1:nz
+    side = grid_index(d.layout.nr,iz,d.layout.nr);
+    residual(layer.ut(side)) = utCoefficient(end,iz);
+    residual(layer.w(side)) = wCoefficient(end,iz);
+end
 end
 
 function [residual, derivatives] = layer_residual(d, state, stateTime, ...
@@ -685,8 +798,9 @@ for ir = 2:nr-1
     residual([layout.l.ur(nodeL), layout.l.ut(nodeL), ...
         layout.l.w(nodeL)]) = 0;
 end
-% Axis has four linear regularity rows; the sidewall has three linear
-% velocity rows while its divergence row remains active.
+% Axis has four linear regularity rows. At the sidewall the three velocity
+% rows are linear; the pressure row carries normal-momentum compatibility
+% and remains active.
 for iz = 1:layout.nzD
     axis = grid_index(1, iz, nr);
     side = grid_index(nr, iz, nr);
@@ -716,7 +830,7 @@ residual = zero_vertical_matching_rows( ...
 residual(layout.zeta([1, nr])) = 0;
 if mOut == 0
     residual(layout.zeta(volume_constraint_index(nr))) = 0;
-    gaugeIr = max(2, min(nr-1, ceil(nr/2)));
+    gaugeIr = d.denseGaugeRadialIndex;
     gaugeIz = d.denseGaugeVerticalIndex;
     gauge = grid_index(gaugeIr, gaugeIz, nr);
     residual(layout.d.p(gauge)) = 0;

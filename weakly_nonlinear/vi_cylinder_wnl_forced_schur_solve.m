@@ -21,6 +21,10 @@ end
 opts = wnl_options(userOpts);
 validateattributes(opts.forcedUseCylinderSchur,{'logical','numeric'}, ...
     {'scalar'});
+validateattributes(opts.forcedCylinderSchurUseEquilibratedBlocks, ...
+    {'logical','numeric'},{'scalar'});
+validatestring(opts.forcedCylinderSchurFactorMethod, ...
+    {'equilibratedLu','columnQr'});
 validateattributes(opts.forcedCylinderSchurBlockRefinementSteps, ...
     {'numeric'},{'scalar','integer','nonnegative','finite'});
 validateattributes(opts.forcedCylinderSchurReducedRefinementSteps, ...
@@ -32,6 +36,18 @@ validateattributes(opts.forcedCylinderSchurBlockRegularizationGrowth, ...
 validateattributes(opts.forcedCylinderSchurBlockRegularizationAttempts, ...
     {'numeric'},{'scalar','integer','nonnegative','finite'});
 validateattributes(opts.forcedCylinderSchurBlockMaximumInverseGain, ...
+    {'numeric'},{'scalar','real','positive','finite'});
+validateattributes(opts.forcedCylinderSchurUseNullspaceBordering, ...
+    {'logical','numeric'},{'scalar'});
+validateattributes(opts.forcedCylinderSchurNullTolerance, ...
+    {'numeric'},{'scalar','real','positive','finite'});
+validateattributes(opts.forcedCylinderSchurMaximumNullity, ...
+    {'numeric'},{'scalar','integer','positive','finite'});
+validateattributes( ...
+    opts.forcedCylinderSchurUsePressureCompatibilityProjection, ...
+    {'logical','numeric'},{'scalar'});
+validateattributes( ...
+    opts.forcedCylinderSchurPressureCompatibilityTolerance, ...
     {'numeric'},{'scalar','real','positive','finite'});
 forcing = forcing(:);
 numberOfHarmonics = numel(spec.n);
@@ -65,65 +81,100 @@ try
     information.numberOfActiveColumns = numberOfActiveColumns;
 
     lambda = wnl_spec_lambda(spec);
-    diagonalFactors = cell(numberOfHarmonics,1);
+    [~,referenceIndex] = min(abs(spec.n(:)+spec.s));
+    referenceDiagonal = temporal_diagonal( ...
+        blocks,omega,spec,lambda,referenceIndex);
+    pressureBasis = pressure_nullspace_basis( ...
+        referenceDiagonal,blocks.B0,spec,opts);
+    information.pressureNullspaceDetected = pressureBasis.nullity > 0;
+    information.pressureNullspaceCertified = pressureBasis.certified;
+    information.pressureNullspaceNullity = pressureBasis.nullity;
+    information.pressureNullspaceReferenceHarmonic = ...
+        spec.n(referenceIndex)+spec.s;
+    information.pressureNullspaceRightResidual = ...
+        pressureBasis.rightResidual;
+    information.pressureNullspaceMassResidual = pressureBasis.massResidual;
+    information.pressureNullspaceLeftResidual = ...
+        pressureBasis.leftResidual;
+    information.pressureNullspaceLeftMassResidual = ...
+        pressureBasis.leftMassResidual;
+    diagonals = cell(numberOfHarmonics,1);
     previousResponse = cell(numberOfHarmonics,1);
     nextResponse = cell(numberOfHarmonics,1);
     maximumResponseResidual = 0;
     blockRegularization = zeros(numberOfHarmonics,1);
     blockInverseGain = nan(numberOfHarmonics,1);
+    blockNullity = zeros(numberOfHarmonics,1);
+    blockFactorMethod = cell(numberOfHarmonics,1);
+    leftCompatibilityBasis = cell(numberOfHarmonics,1);
+    nullspaceBasis = [];
+    if pressureBasis.certified
+        nullspaceBasis = pressureBasis;
+    end
     reducedRegularization = NaN;
     reducedInverseGain = NaN;
+    forcingByHarmonic = reshape(forcing,ndof,numberOfHarmonics);
+    particular = complex(zeros(ndof,numberOfHarmonics));
 
     factorClock = tic;
     for harmonicIndex = 1:numberOfHarmonics
         diagonal = temporal_diagonal( ...
             blocks,omega,spec,lambda,harmonicIndex);
-        [diagonalFactors{harmonicIndex}, ...
+        diagonals{harmonicIndex} = diagonal;
+        [diagonalFactor, ...
             blockRegularization(harmonicIndex), ...
             blockInverseGain(harmonicIndex)] = ...
             factor_temporal_system(diagonal,opts,sprintf( ...
-            'temporal block %d',harmonicIndex));
+            'temporal block %d',harmonicIndex),nullspaceBasis);
+        blockNullity(harmonicIndex) = ...
+            diagonalFactor.nullity;
+        blockFactorMethod{harmonicIndex} = ...
+            diagonalFactor.method;
+        leftCompatibilityBasis{harmonicIndex} = ...
+            harmonic_left_compatibility_basis( ...
+            diagonalFactor,diagonal,opts);
         if numberOfActiveColumns > 0
             responseRightHandSide = [ ...
                 previousCoupling(:,activeColumns), ...
-                nextCoupling(:,activeColumns)];
+                nextCoupling(:,activeColumns), ...
+                forcingByHarmonic(:,harmonicIndex)];
             response = refined_factor_solve( ...
-                diagonalFactors{harmonicIndex},diagonal, ...
+                diagonalFactor,diagonal, ...
                 responseRightHandSide, ...
                 opts.forcedCylinderSchurBlockRefinementSteps);
             previousResponse{harmonicIndex} = ...
                 response(:,1:numberOfActiveColumns);
             nextResponse{harmonicIndex} = ...
-                response(:,numberOfActiveColumns+1:end);
+                response(:,numberOfActiveColumns+1: ...
+                2*numberOfActiveColumns);
+            particular(:,harmonicIndex) = response(:,end);
             responseResidual = norm( ...
-                diagonal*response-responseRightHandSide,'fro') / ...
-                max(norm(responseRightHandSide,'fro'),eps);
+                diagonal*response(:,1:2*numberOfActiveColumns)- ...
+                responseRightHandSide(:,1:2*numberOfActiveColumns), ...
+                'fro') / max(norm(responseRightHandSide( ...
+                :,1:2*numberOfActiveColumns),'fro'),eps);
             maximumResponseResidual = max( ...
                 maximumResponseResidual,responseResidual);
         else
             previousResponse{harmonicIndex} = ...
                 complex(zeros(ndof,0));
             nextResponse{harmonicIndex} = complex(zeros(ndof,0));
+            particular(:,harmonicIndex) = refined_factor_solve( ...
+                diagonalFactor,diagonal, ...
+                forcingByHarmonic(:,harmonicIndex), ...
+                opts.forcedCylinderSchurBlockRefinementSteps);
         end
+        clear diagonalFactor;
     end
     information.factorSeconds = toc(factorClock);
     information.maximumResponseResidual = maximumResponseResidual;
     information.blockRegularizationRange = ...
         finite_range(blockRegularization);
     information.maximumBlockInverseGain = maximum_finite(blockInverseGain);
+    information.blockNullityRange = finite_range(blockNullity);
+    information.blockFactorMethods = unique(blockFactorMethod,'stable');
 
-    particularClock = tic;
-    forcingByHarmonic = reshape(forcing,ndof,numberOfHarmonics);
-    particular = complex(zeros(ndof,numberOfHarmonics));
-    for harmonicIndex = 1:numberOfHarmonics
-        diagonal = temporal_diagonal( ...
-            blocks,omega,spec,lambda,harmonicIndex);
-        particular(:,harmonicIndex) = refined_factor_solve( ...
-            diagonalFactors{harmonicIndex},diagonal, ...
-            forcingByHarmonic(:,harmonicIndex), ...
-            opts.forcedCylinderSchurBlockRefinementSteps);
-    end
-    information.particularSeconds = toc(particularClock);
+    information.particularSeconds = 0;
 
     reducedClock = tic;
     if numberOfActiveColumns == 0
@@ -137,7 +188,7 @@ try
         information.reducedDimension = size(reduced,1);
         [reducedFactor,reducedRegularization,reducedInverseGain] = ...
             factor_temporal_system(reduced,opts, ...
-            'reduced temporal Schur system');
+            'reduced temporal Schur system',[]);
         activeState = refined_factor_solve( ...
             reducedFactor,reduced,reducedRightHandSide, ...
             opts.forcedCylinderSchurReducedRefinementSteps);
@@ -168,19 +219,63 @@ try
     information.reducedInverseGain = reducedInverseGain;
     information.reducedSeconds = toc(reducedClock);
 
+    % Opt-in physical conjugacy for a real axisymmetric forced field.
+    % Validate the projected state with the same raw/quotient residual gates
+    % below, rather than modifying an already-accepted state afterwards.
+    if isfield(opts,'forcedCylinderSchurEnforceRealField') && ...
+            opts.forcedCylinderSchurEnforceRealField
+        assert(spec.m==0 && abs(imag(lambda))<1e-12 && ...
+            abs(2*spec.s-round(2*spec.s))<1e-12, ...
+            'Real-field enforcement requires a self-conjugate block.');
+        [found,partners]=ismember(-spec.n-2*spec.s,spec.n);
+        assert(all(found),'The harmonic window must be conjugacy closed.');
+        forcingDefect=norm(forcingByHarmonic- ...
+            conj(forcingByHarmonic(:,partners)),'fro')/max(norm(forcing),eps);
+        assert(forcingDefect<1e-10,'The supplied forcing is not self-conjugate.');
+        reflected=conj(stateByHarmonic(:,partners));
+        information.realFieldRawConjugacyDefect= ...
+            norm(stateByHarmonic-reflected,'fro')/ ...
+            max(norm(stateByHarmonic,'fro'),eps);
+        stateByHarmonic=0.5*(stateByHarmonic+reflected);
+        information.realFieldProjectionApplied=true;
+    end
+
     vector = stateByHarmonic(:);
     residual = complete_temporal_residual( ...
         blocks,omega,spec,lambda,stateByHarmonic,forcingByHarmonic);
     information.relativeResidual = norm(residual(:)) / ...
         max(norm(forcing),eps);
+    quotient = pressure_compatible_residual( ...
+        residual,diagonals,pressureBasis,leftCompatibilityBasis, ...
+        norm(forcing),opts);
+    information.pressureCompatibilityProjectionApplied = ...
+        quotient.applied;
+    information.pressureCompatibleRelativeResidual = ...
+        quotient.relativeResidual;
+    information.pressureCompatibilityRelativeResidual = ...
+        quotient.compatibilityRelativeResidual;
+    information.pressureCompatibilityAnalyzedHarmonics = ...
+        quotient.analyzedHarmonics;
+    information.pressureCompatibilityMaximumNullResidual = ...
+        quotient.maximumNullResidual;
+    information.pressureCompatibilityGatePassed = ...
+        ~quotient.applied || ...
+        quotient.compatibilityRelativeResidual <= ...
+        opts.forcedCylinderSchurPressureCompatibilityTolerance;
+    information.acceptanceRelativeResidual = quotient.relativeResidual;
     information.available = all(isfinite(real(vector))) && ...
         all(isfinite(imag(vector))) && ...
-        isfinite(information.relativeResidual);
+        isfinite(information.relativeResidual) && ...
+        isfinite(information.acceptanceRelativeResidual);
     information.passedPhysicalGate = information.available && ...
-        information.relativeResidual <= ...
-        opts.forcedSolveResidualTolerance;
+        information.acceptanceRelativeResidual <= ...
+        opts.forcedSolveResidualTolerance && ...
+        information.pressureCompatibilityGatePassed;
     information.totalSeconds = toc(solverClock);
-    if information.passedPhysicalGate
+    if information.passedPhysicalGate && quotient.applied
+        information.stopReason = ...
+            'the certified pressure-quotient Floquet equations passed';
+    elseif information.passedPhysicalGate
         information.stopReason = ...
             'the original unequilibrated Floquet equations passed';
     elseif information.available
@@ -207,8 +302,24 @@ function information = initial_information()
 information = struct('attempted',false,'available',false, ...
     'method','cylinder low-rank temporal Schur', ...
     'passedPhysicalGate',false,'relativeResidual',Inf, ...
+    'acceptanceRelativeResidual',Inf, ...
+    'pressureCompatibleRelativeResidual',Inf, ...
+    'pressureCompatibilityRelativeResidual',0, ...
+    'pressureCompatibilityProjectionApplied',false, ...
+    'pressureCompatibilityGatePassed',true, ...
+    'pressureCompatibilityAnalyzedHarmonics',0, ...
+    'pressureCompatibilityMaximumNullResidual',NaN, ...
+    'pressureNullspaceDetected',false, ...
+    'pressureNullspaceCertified',false, ...
+    'pressureNullspaceNullity',0, ...
+    'pressureNullspaceReferenceHarmonic',NaN, ...
+    'pressureNullspaceRightResidual',NaN, ...
+    'pressureNullspaceMassResidual',NaN, ...
+    'pressureNullspaceLeftResidual',NaN, ...
+    'pressureNullspaceLeftMassResidual',NaN, ...
     'reducedResidual',NaN,'maximumResponseResidual',NaN, ...
     'blockRegularizationRange',[NaN,NaN], ...
+    'blockNullityRange',[NaN,NaN],'blockFactorMethods',{{}}, ...
     'maximumBlockInverseGain',NaN, ...
     'reducedRegularization',NaN,'reducedInverseGain',NaN, ...
     'numberOfHarmonics',0,'numberOfActiveColumns',0, ...
@@ -243,7 +354,16 @@ diagonal = (lambda+1i*omega*frequency)*blocks.B0-blocks.L0;
 end
 
 function [factor,regularization,inverseGain] = ...
-        factor_temporal_system(matrix,opts,description)
+        factor_temporal_system(matrix,opts,description,nullspaceBasis)
+if nargin < 4
+    nullspaceBasis = [];
+end
+nullityHint = [];
+if isstruct(nullspaceBasis) && isfield(nullspaceBasis,'nullity')
+    nullityHint = nullspaceBasis.nullity;
+elseif isnumeric(nullspaceBasis)
+    nullityHint = nullspaceBasis;
+end
 matrixSize = size(matrix,1);
 if size(matrix,2) ~= matrixSize
     error('vi_cylinder_wnl_forced_schur_solve:FactorSize', ...
@@ -269,24 +389,117 @@ factor = [];
 regularization = NaN;
 inverseGain = Inf;
 lastMessage = 'no factor attempt was made';
-for shiftIndex = 1:numel(shifts)
+
+% A certified pressure-nullspace basis takes precedence over structural
+% rank. Spectral collocation can turn an exact pressure gauge freedom into
+% a tiny nonzero pivot, so sprank(matrix)==matrixSize does not imply that
+% an unconstrained LU is physically meaningful. Complete that known
+% nullspace before solving any forcing or interface-response columns.
+hasCertifiedNullityHint = ...
+    opts.forcedCylinderSchurUseNullspaceBordering && ...
+    isstruct(nullspaceBasis) && ...
+    isfield(nullspaceBasis,'certified') && nullspaceBasis.certified && ...
+    nullityHint > 0 && ...
+    ~contains(description,'reduced temporal Schur system');
+if hasCertifiedNullityHint
+    try
+        [trialFactor,trialGain,relativeTrialResidual] = ...
+            construct_fixed_range_border_factor( ...
+            matrix,probe,probeNorm,opts,nullspaceBasis,description);
+        if trialGain <= opts.forcedCylinderSchurBlockMaximumInverseGain && ...
+                relativeTrialResidual <= 1.0e-6
+            factor = trialFactor;
+            regularization = 0;
+            inverseGain = trialGain;
+            return;
+        end
+        lastMessage = sprintf([ ...
+            'hinted nullspace border gave inverse gain %.3e and ', ...
+            'augmented residual %.3e'],trialGain,relativeTrialResidual);
+    catch factorError
+        lastMessage = factorError.message;
+    end
+end
+
+% First try the exact unshifted equations. If their primitive-variable
+% pressure block is rank deficient, complete only that nullspace with a
+% bordered minimum-norm constraint. A uniform diagonal shift perturbs every
+% momentum, incompressibility, boundary, and interface equation and is kept
+% solely as the final seed fallback.
+useColumnQr = strcmp(opts.forcedCylinderSchurFactorMethod,'columnQr') && ...
+    ~contains(description,'reduced temporal Schur system');
+if useColumnQr
+    try
+        factor = construct_column_equilibrated_qr_factor( ...
+            matrix,nullityHint);
+        regularization = 0;
+        inverseGain = NaN;
+        return;
+    catch factorError
+        lastMessage = factorError.message;
+    end
+end
+if opts.forcedCylinderSchurUseEquilibratedBlocks
+    if sprank(matrix) == matrixSize
+        try
+            trialFactor = construct_equilibrated_lu_factor(matrix);
+            factor = trialFactor;
+            regularization = 0;
+            inverseGain = NaN;
+            return;
+        catch factorError
+            lastMessage = factorError.message;
+        end
+    else
+        lastMessage = ...
+            'the unshifted matrix is structurally rank deficient';
+    end
+end
+try
+    [trialFactor,trialGain,relativeTrialResidual] = ...
+        construct_lu_factor(matrix,probe,probeNorm);
+    if trialGain <= opts.forcedCylinderSchurBlockMaximumInverseGain && ...
+            relativeTrialResidual <= 1.0e-6
+        factor = trialFactor;
+        regularization = 0;
+        inverseGain = trialGain;
+        return;
+    end
+    lastMessage = sprintf( ...
+        'unshifted LU gave inverse gain %.3e and residual %.3e', ...
+        trialGain,relativeTrialResidual);
+catch factorError
+    lastMessage = factorError.message;
+end
+
+if opts.forcedCylinderSchurUseNullspaceBordering
+    try
+        [trialFactor,trialGain,relativeTrialResidual] = ...
+            construct_nullspace_bordered_factor( ...
+            matrix,probe,probeNorm,opts,nullityHint,description);
+        if trialGain <= opts.forcedCylinderSchurBlockMaximumInverseGain && ...
+                relativeTrialResidual <= 1.0e-6
+            factor = trialFactor;
+            regularization = 0;
+            inverseGain = trialGain;
+            return;
+        end
+        lastMessage = sprintf([ ...
+            'nullspace-bordered LU gave inverse gain %.3e and augmented ', ...
+            'residual %.3e'],trialGain,relativeTrialResidual);
+    catch factorError
+        lastMessage = factorError.message;
+    end
+end
+
+for shiftIndex = find(shifts > 0)
     shift = shifts(shiftIndex);
     shiftedMatrix = matrix;
-    if shift > 0
-        shiftedMatrix = shiftedMatrix+shift*identity;
-    end
+    shiftedMatrix = shiftedMatrix+shift*identity;
     try
-        trialFactor = decomposition(shiftedMatrix,'lu');
-        trialSolution = factor_solve_safely(trialFactor,probe);
-        solutionNorm = sqrt(sum(abs(trialSolution).^2,1));
-        trialGain = max(solutionNorm./probeNorm);
-        trialResidual = shiftedMatrix*trialSolution-probe;
-        relativeTrialResidual = max( ...
-            sqrt(sum(abs(trialResidual).^2,1))./probeNorm);
-        finiteTrial = all(isfinite(real(trialSolution(:)))) && ...
-            all(isfinite(imag(trialSolution(:))));
-        if finiteTrial && ...
-                trialGain <= ...
+        [trialFactor,trialGain,relativeTrialResidual] = ...
+            construct_lu_factor(shiftedMatrix,probe,probeNorm);
+        if trialGain <= ...
                 opts.forcedCylinderSchurBlockMaximumInverseGain && ...
                 relativeTrialResidual <= 1.0e-6
             factor = trialFactor;
@@ -306,9 +519,175 @@ error('vi_cylinder_wnl_forced_schur_solve:TemporalFactorization', ...
      'attempt(s): %s'],description,numel(shifts),lastMessage);
 end
 
+function factor = construct_column_equilibrated_qr_factor( ...
+        matrix,nullityHint)
+if isempty(nullityHint)
+    nullityHint = 0;
+end
+matrixSize = size(matrix,1);
+columnNorm = full(sqrt(sum(abs(matrix).^2,1))).';
+largest = max(columnNorm);
+columnScale = ones(size(columnNorm));
+if ~isempty(largest) && largest > eps
+    floorValue = max(largest*1.0e-14,eps);
+    positive = columnNorm > 0;
+    columnScale(positive) = ...
+        1./max(columnNorm(positive),floorValue);
+end
+scaledMatrix = matrix*spdiags( ...
+    columnScale,0,matrixSize,matrixSize);
+factor = struct('method','column-equilibrated-qr', ...
+    'decomposition',decomposition(scaledMatrix,'qr'), ...
+    'numberOfStateRows',matrixSize,'nullity',nullityHint, ...
+    'columnScale',columnScale);
+end
+
+function factor = construct_equilibrated_lu_factor(matrix)
+matrixSize = size(matrix,1);
+rowNorm = full(sqrt(sum(abs(matrix).^2,2)));
+rowScale = 1./max(rowNorm,eps);
+rowScaled = spdiags(rowScale,0,matrixSize,matrixSize)*matrix;
+columnNorm = full(sqrt(sum(abs(rowScaled).^2,1))).';
+columnScale = 1./max(columnNorm,eps);
+scaledMatrix = rowScaled*spdiags( ...
+    columnScale,0,matrixSize,matrixSize);
+warningStates = suppress_factor_warnings();
+cleanup = onCleanup(@() restore_warning_states(warningStates));
+scaledDecomposition = decomposition(scaledMatrix,'lu');
+clear cleanup;
+factor = struct('method','equilibrated-lu','decomposition', ...
+    scaledDecomposition, ...
+    'numberOfStateRows',size(matrix,1),'nullity',0, ...
+    'rowScale',rowScale,'columnScale',columnScale);
+end
+
+function [factor,inverseGain,relativeResidual] = ...
+        construct_lu_factor(matrix,probe,probeNorm)
+factor = struct('method','lu','decomposition', ...
+    decomposition(matrix,'lu'),'numberOfStateRows',size(matrix,1), ...
+    'nullity',0);
+trialSolution = factor_solve_safely(factor,probe);
+solutionNorm = sqrt(sum(abs(trialSolution).^2,1));
+inverseGain = max(solutionNorm./probeNorm);
+trialResidual = matrix*trialSolution-probe;
+relativeResidual = max( ...
+    sqrt(sum(abs(trialResidual).^2,1))./probeNorm);
+if any(~isfinite(real(trialSolution(:)))) || ...
+        any(~isfinite(imag(trialSolution(:))))
+    inverseGain = Inf;
+    relativeResidual = Inf;
+end
+end
+
+function [factor,inverseGain,relativeResidual] = ...
+        construct_fixed_range_border_factor( ...
+        matrix,probe,probeNorm,opts,basis,description)
+matrixSize = size(matrix,1);
+rangeBorder = sparse(basis.left);
+rightNull = sparse(basis.right);
+nullity = basis.nullity;
+if size(rangeBorder,2) ~= nullity || size(rightNull,2) ~= nullity
+    error('vi_cylinder_wnl_forced_schur_solve:KnownNullspaceSize', ...
+        'The certified nullspace size is inconsistent for %s.',description);
+end
+nullTolerance = max( ...
+    100*opts.forcedCylinderSchurNullTolerance,1.0e-9);
+rightResidual = norm(matrix*rightNull,'fro') / ...
+    max(norm(matrix,1)*norm(rightNull,'fro'),eps);
+if rightResidual > nullTolerance
+    error('vi_cylinder_wnl_forced_schur_solve:KnownNullspaceResidual', ...
+        ['The certified right pressure-nullspace is not invariant for ', ...
+         '%s: residual %.3e.'],description,rightResidual);
+end
+% The left nullspace varies with temporal frequency because U'*B need not
+% vanish. Its reference value is nevertheless a valid fixed range-
+% completion border whenever the augmented factor is nonsingular. Any
+% nonzero border multiplier appears in the original physical residual,
+% which remains the final acceptance gate.
+bordered = [matrix,rangeBorder;rightNull',sparse(nullity,nullity)];
+factor = struct('method','fixed-range-bordered-lu', ...
+    'decomposition',decomposition(bordered,'lu'), ...
+    'numberOfStateRows',matrixSize,'nullity',nullity);
+rightHandSide = [probe;complex(zeros(nullity,size(probe,2)))];
+warningStates = suppress_factor_warnings();
+cleanup = onCleanup(@() restore_warning_states(warningStates));
+trialAugmented = factor.decomposition\rightHandSide;
+clear cleanup;
+trialSolution = trialAugmented(1:matrixSize,:);
+solutionNorm = sqrt(sum(abs(trialSolution).^2,1));
+inverseGain = max(solutionNorm./probeNorm);
+trialResidual = bordered*trialAugmented-rightHandSide;
+relativeResidual = max( ...
+    sqrt(sum(abs(trialResidual).^2,1))./probeNorm);
+if any(~isfinite(real(trialAugmented(:)))) || ...
+        any(~isfinite(imag(trialAugmented(:))))
+    inverseGain = Inf;
+    relativeResidual = Inf;
+end
+end
+
+function [factor,inverseGain,relativeResidual] = ...
+        construct_nullspace_bordered_factor( ...
+        matrix,probe,probeNorm,opts,nullityHint,description)
+matrixSize = size(matrix,1);
+if isempty(nullityHint)
+    numberRequested = min(opts.forcedCylinderSchurMaximumNullity, ...
+        max(matrixSize-1,1));
+else
+    numberRequested = min(nullityHint,max(matrixSize-1,1));
+end
+[leftVectors,singularValues,rightVectors] = ...
+    svds(matrix,numberRequested,'smallest');
+[singularValues,order] = sort(real(diag(singularValues)),'ascend');
+leftVectors = leftVectors(:,order);
+rightVectors = rightVectors(:,order);
+threshold = opts.forcedCylinderSchurNullTolerance*max(norm(matrix,1),1);
+nullity = sum(singularValues <= threshold);
+if nullity == 0
+    error('vi_cylinder_wnl_forced_schur_solve:NoTemporalNullspace', ...
+        ['The exact LU failed for %s, but no singular value fell below ', ...
+         'the nullspace threshold %.3e.'],description,threshold);
+end
+if isempty(nullityHint) && nullity == numberRequested && ...
+        numberRequested < matrixSize-1
+    error('vi_cylinder_wnl_forced_schur_solve:TemporalNullspaceLimit', ...
+        ['At least %d temporal null vectors were detected; increase ', ...
+         'forcedCylinderSchurMaximumNullity.'],numberRequested);
+end
+leftNull = sparse(leftVectors(:,1:nullity));
+rightNull = sparse(rightVectors(:,1:nullity));
+bordered = [matrix,leftNull;rightNull',sparse(nullity,nullity)];
+factor = struct('method','nullspace-bordered-lu','decomposition', ...
+    decomposition(bordered,'lu'),'numberOfStateRows',matrixSize, ...
+    'nullity',nullity);
+rightHandSide = [probe;complex(zeros(nullity,size(probe,2)))];
+warningStates = suppress_factor_warnings();
+cleanup = onCleanup(@() restore_warning_states(warningStates));
+trialAugmented = factor.decomposition\rightHandSide;
+clear cleanup;
+trialSolution = trialAugmented(1:matrixSize,:);
+solutionNorm = sqrt(sum(abs(trialSolution).^2,1));
+inverseGain = max(solutionNorm./probeNorm);
+trialResidual = bordered*trialAugmented-rightHandSide;
+relativeResidual = max( ...
+    sqrt(sum(abs(trialResidual).^2,1))./probeNorm);
+if any(~isfinite(real(trialAugmented(:)))) || ...
+        any(~isfinite(imag(trialAugmented(:))))
+    inverseGain = Inf;
+    relativeResidual = Inf;
+end
+end
+
 function solution = refined_factor_solve( ...
         factor,matrix,rightHandSide,numberOfSteps)
 solution = factor_solve_safely(factor,rightHandSide);
+if isstruct(factor) && ...
+        strcmp(factor.method,'column-equilibrated-qr')
+    % QR already returns the least-squares solution in the selected rank
+    % subspace. Re-solving its orthogonal residual cannot improve that
+    % objective and only repeats an expensive sparse backsolve.
+    numberOfSteps = 0;
+end
 for refinementIndex = 1:numberOfSteps
     residual = rightHandSide-matrix*solution;
     oldNorm = norm(residual,'fro');
@@ -333,14 +712,32 @@ end
 function solution = factor_solve_safely(factor,rightHandSide)
 warningStates = suppress_factor_warnings();
 cleanup = onCleanup(@() restore_warning_states(warningStates));
-solution = factor\rightHandSide;
+if isstruct(factor)
+    if strcmp(factor.method,'column-equilibrated-qr')
+        solution = factor.columnScale.* ...
+            (factor.decomposition\rightHandSide);
+    elseif strcmp(factor.method,'equilibrated-lu')
+        solution = factor.columnScale.* ...
+            (factor.decomposition\(factor.rowScale.*rightHandSide));
+    elseif factor.nullity > 0
+        augmentedRightHandSide = [rightHandSide;complex(zeros( ...
+            factor.nullity,size(rightHandSide,2)))];
+        augmentedSolution = factor.decomposition\augmentedRightHandSide;
+        solution = augmentedSolution(1:factor.numberOfStateRows,:);
+    else
+        solution = factor.decomposition\rightHandSide;
+    end
+else
+    solution = factor\rightHandSide;
+end
 clear cleanup;
 end
 
 function warningStates = suppress_factor_warnings()
 warningIds = {'MATLAB:singularMatrix', ...
     'MATLAB:nearlySingularMatrix', ...
-    'MATLAB:illConditionedMatrix'};
+    'MATLAB:illConditionedMatrix', ...
+    'MATLAB:rankDeficientMatrix'};
 warningStates = repmat(struct('identifier','','state',''), ...
     numel(warningIds),1);
 for warningIndex = 1:numel(warningIds)
@@ -354,6 +751,158 @@ for warningIndex = 1:numel(warningStates)
     warning(warningStates(warningIndex).state, ...
         warningStates(warningIndex).identifier);
 end
+end
+
+function basis = pressure_nullspace_basis(matrix,mass,spec,opts)
+basis = struct('left',complex(zeros(size(matrix,1),0)), ...
+    'right',complex(zeros(size(matrix,1),0)), ...
+    'nullity',0,'certified',false,'rightResidual',NaN, ...
+    'massResidual',NaN,'leftResidual',NaN,'leftMassResidual',NaN);
+if spec.m ~= 0 || ~opts.forcedCylinderSchurUseNullspaceBordering
+    return;
+end
+numberRequested = min(opts.forcedCylinderSchurMaximumNullity, ...
+    size(matrix,1)-1);
+try
+    [leftVectors,singularValues,rightVectors] = ...
+        svds(matrix,numberRequested,'smallest');
+catch
+    return;
+end
+[singularValues,order] = sort(real(diag(singularValues)),'ascend');
+leftVectors = leftVectors(:,order);
+rightVectors = rightVectors(:,order);
+threshold = opts.forcedCylinderSchurNullTolerance* ...
+    max(norm(matrix,1),1);
+nullity = sum(singularValues <= threshold);
+if nullity == 0 || ...
+        (nullity == numberRequested && numberRequested < size(matrix,1)-1)
+    return;
+end
+leftNull = leftVectors(:,1:nullity);
+rightNull = rightVectors(:,1:nullity);
+massColumnNorm = full(sqrt(sum(abs(mass).^2,1))).';
+algebraicColumns = massColumnNorm <= ...
+    max(max(massColumnNorm)*1.0e-13,eps);
+projectedRight = complex(zeros(size(rightNull)));
+projectedRight(algebraicColumns,:) = rightNull(algebraicColumns,:);
+[projectedRight,~] = qr(projectedRight,0);
+rawResidual = norm(matrix*rightNull,'fro') / ...
+    max(norm(matrix,1)*norm(rightNull,'fro'),eps);
+projectedResidual = norm(matrix*projectedRight,'fro') / ...
+    max(norm(matrix,1)*norm(projectedRight,'fro'),eps);
+if projectedResidual <= max(100*rawResidual, ...
+        10*opts.forcedCylinderSchurNullTolerance)
+    rightNull = projectedRight;
+end
+basis.left = leftNull;
+basis.right = rightNull;
+basis.nullity = nullity;
+basis.rightResidual = norm(matrix*rightNull,'fro') / ...
+    max(norm(matrix,1)*norm(rightNull,'fro'),eps);
+basis.massResidual = norm(mass*rightNull,'fro') / ...
+    max(norm(mass,1)*norm(rightNull,'fro'),eps);
+basis.leftResidual = norm(leftNull'*matrix,'fro') / ...
+    max(norm(matrix,1)*norm(leftNull,'fro'),eps);
+basis.leftMassResidual = norm(leftNull'*mass,'fro') / ...
+    max(norm(mass,1)*norm(leftNull,'fro'),eps);
+certificationTolerance = max( ...
+    100*opts.forcedCylinderSchurNullTolerance,1.0e-10);
+basis.certified = isfinite(basis.rightResidual) && ...
+    isfinite(basis.massResidual) && isfinite(basis.leftResidual) && ...
+    basis.rightResidual <= certificationTolerance && ...
+    basis.massResidual <= certificationTolerance && ...
+    basis.leftResidual <= certificationTolerance;
+end
+
+function leftNull = harmonic_left_compatibility_basis( ...
+        factor,matrix,opts)
+leftNull = complex(zeros(size(matrix,1),0));
+if ~opts.forcedCylinderSchurUsePressureCompatibilityProjection || ...
+        ~isstruct(factor) || factor.nullity <= 0 || ...
+        ~strcmp(factor.method,'fixed-range-bordered-lu')
+    return;
+end
+matrixSize = size(matrix,1);
+nullity = factor.nullity;
+rightHandSide = [complex(zeros(matrixSize,nullity));speye(nullity)];
+warningStates = suppress_factor_warnings();
+cleanup = onCleanup(@() restore_warning_states(warningStates));
+augmentedSolution = factor.decomposition'\rightHandSide;
+clear cleanup;
+candidate = augmentedSolution(1:matrixSize,:);
+if any(~isfinite(real(candidate(:)))) || ...
+        any(~isfinite(imag(candidate(:))))
+    return;
+end
+[candidate,~] = qr(candidate,0);
+relativeResidual = norm(candidate'*matrix,'fro') / ...
+    max(norm(matrix,1)*norm(candidate,'fro'),eps);
+certificationTolerance = max( ...
+    100*opts.forcedCylinderSchurNullTolerance,1.0e-9);
+if isfinite(relativeResidual) && ...
+        relativeResidual <= certificationTolerance
+    leftNull = candidate;
+end
+end
+
+function result = pressure_compatible_residual( ...
+        residual,diagonals,basis,leftCompatibilityBasis,forcingNorm,opts)
+result = struct('applied',false, ...
+    'relativeResidual',norm(residual(:))/max(forcingNorm,eps), ...
+    'compatibilityRelativeResidual',0,'analyzedHarmonics',0, ...
+    'maximumNullResidual',NaN);
+if ~opts.forcedCylinderSchurUsePressureCompatibilityProjection || ...
+        ~basis.certified || basis.nullity == 0
+    return;
+end
+if numel(leftCompatibilityBasis) ~= size(residual,2)
+    return;
+end
+numberOfHarmonics = size(residual,2);
+analysisFloor = opts.forcedSolveResidualTolerance*forcingNorm / ...
+    max(100*sqrt(numberOfHarmonics),1);
+projected = residual;
+maximumNullResidual = 0;
+analyzed = 0;
+try
+    for harmonicIndex = 1:numberOfHarmonics
+        if norm(residual(:,harmonicIndex)) <= analysisFloor
+            continue;
+        end
+        diagonal = diagonals{harmonicIndex};
+        rightResidual = norm(diagonal*basis.right,'fro') / ...
+            max(norm(diagonal,1)*norm(basis.right,'fro'),eps);
+        if rightResidual > max( ...
+                100*opts.forcedCylinderSchurNullTolerance,1.0e-9)
+            return;
+        end
+        leftNull = leftCompatibilityBasis{harmonicIndex};
+        if size(leftNull,2) ~= basis.nullity
+            return;
+        end
+        relativeNullResidual = norm(leftNull'*diagonal,'fro') / ...
+            max(norm(diagonal,1)*norm(leftNull,'fro'),eps);
+        maximumNullResidual = max( ...
+            maximumNullResidual,relativeNullResidual);
+        if relativeNullResidual > max( ...
+                100*opts.forcedCylinderSchurNullTolerance,1.0e-9)
+            return;
+        end
+        projected(:,harmonicIndex) = residual(:,harmonicIndex)- ...
+            leftNull*(leftNull'*residual(:,harmonicIndex));
+        analyzed = analyzed+1;
+    end
+catch
+    return;
+end
+removed = residual-projected;
+result.applied = analyzed > 0;
+result.relativeResidual = norm(projected(:))/max(forcingNorm,eps);
+result.compatibilityRelativeResidual = ...
+    norm(removed(:))/max(forcingNorm,eps);
+result.analyzedHarmonics = analyzed;
+result.maximumNullResidual = maximumNullResidual;
 end
 
 function range = finite_range(values)

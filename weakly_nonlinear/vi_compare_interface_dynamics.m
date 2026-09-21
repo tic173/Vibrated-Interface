@@ -1,6 +1,6 @@
 function result = vi_compare_interface_dynamics(linearResult, ...
         wnlAmplitudeOverH, wnlResult, metadata, parameters, ...
-        settings, amplitudeScale)
+        settings, amplitudeScale, linearAmplitudeOverH)
 %VI_COMPARE_INTERFACE_DYNAMICS Reconstruct the same interface observable.
 %
 % The linear prediction is
@@ -11,11 +11,17 @@ function result = vi_compare_interface_dynamics(linearResult, ...
 % full-cylinder neutral interface mode. When available, it also includes
 % the slaved O(A^2) second-azimuthal-harmonic and mean-interface fields,
 %
-%   zeta_WNL/h = Re{A*phi + A^2*q_AA + |A|^2*q_AbarA}.
+% A is first converted from physical peak displacement to the internal
+% modal coordinate. Distinct conjugate pairs are reconstructed as twice a
+% real part; self-conjugate real modes appear only once.
 %
 % The cubic coefficient affects A(t). A third-order correction to the
 % reconstructed spatial shape is not included because it is not needed for
 % the cubic solvability coefficient and is not solved by this module.
+
+if nargin < 8
+    linearAmplitudeOverH = [];
+end
 
 requiredLinear = {'timeStar', 'forcingPeriods', 'displacementOverH', ...
     'floquetOscillation', 'betaStar'};
@@ -32,9 +38,15 @@ assert(isfield(metadata, 'discretization') && ...
 assert(isfield(parameters, 'omegaStar') && isfield(parameters, 'R0'), ...
     'parameters.omegaStar and parameters.R0 are required.');
 validateattributes(amplitudeScale, {'numeric'}, ...
-    {'scalar', 'real', 'positive', 'finite'});
+    {'vector', 'real', 'positive', 'finite'});
+if numel(amplitudeScale) ~= 1
+    error('vi_compare_interface_dynamics:AmplitudeScaleSize', ...
+        'A one-mode reconstruction requires one amplitude scale.');
+end
 
 [mode, selfResult] = first_mode_and_self(wnlResult);
+coordinateType = wnl_mode_coordinate_type(mode);
+primaryMultiplicity = wnl_mode_amplitude_scale(mode);
 timeStar = linearResult.timeStar(:).';
 forcingPeriods = linearResult.forcingPeriods(:).';
 wnlAmplitudeOverH = wnlAmplitudeOverH(:).';
@@ -45,9 +57,20 @@ radialGrid = metadata.discretization.r(:);
 [radialGrid, radialOrder] = sort(radialGrid, 'ascend');
 zetaRows = metadata.layout.zeta;
 
-primaryCarrier = interface_carrier(mode.field, zetaRows, ...
-    parameters.omegaStar, timeStar);
+radialModeCorrection = vi_radial_mode_correction( ...
+    mode,metadata,parameters,settings);
+frequency = mode.field.spec.n(:)+mode.field.spec.s;
+temporalPhase = exp(1i*frequency*(parameters.omegaStar*timeStar));
+primaryCarrier = radialModeCorrection.selectedCoefficients*temporalPhase;
+fullPrimaryCarrier = radialModeCorrection.fullCoefficients*temporalPhase;
+besselPrimaryCarrier = ...
+    radialModeCorrection.separableCoefficients*temporalPhase;
+radialCorrectionCarrier = ...
+    radialModeCorrection.correctionCoefficients*temporalPhase;
 primaryCarrier = primaryCarrier(radialOrder, :);
+fullPrimaryCarrier = fullPrimaryCarrier(radialOrder,:);
+besselPrimaryCarrier = besselPrimaryCarrier(radialOrder,:);
+radialCorrectionCarrier = radialCorrectionCarrier(radialOrder,:);
 
 linearRadialShape = besselj(mode.spec.m, ...
     linearResult.betaStar*radialGrid);
@@ -73,7 +96,11 @@ alignmentProduct = conj(primaryCarrier(:, firstPeriod)) .* ...
 alignmentOverlap = sum(alignmentProduct(:));
 alignmentDenominator = norm(primaryCarrier(:, firstPeriod), 'fro') * ...
     norm(linearCarrierForAlignment(:, firstPeriod), 'fro');
-if abs(alignmentOverlap) <= eps*max(alignmentDenominator, 1)
+if ~isempty(linearAmplitudeOverH)
+    alignmentPhase = 1.0;
+    normalizedAlignmentOverlap = ...
+        abs(alignmentOverlap)/max(alignmentDenominator,eps);
+elseif abs(alignmentOverlap) <= eps*max(alignmentDenominator, 1)
     alignmentPhase = 1.0;
     normalizedAlignmentOverlap = 0.0;
     warning('vi_compare_interface_dynamics:PhaseAlignmentFailed', ...
@@ -87,6 +114,18 @@ end
 modalAmplitude = ...
     (wnlAmplitudeOverH/amplitudeScale)*alignmentPhase;
 wnlPrimaryModal = primaryCarrier.*modalAmplitude;
+radialCorrectionModal = radialCorrectionCarrier.*modalAmplitude;
+linearUsesRecoveredCarrier = ~isempty(linearAmplitudeOverH);
+if linearUsesRecoveredCarrier
+    linearAmplitudeOverH = linearAmplitudeOverH(:).';
+    if numel(linearAmplitudeOverH) ~= numel(timeStar)
+        error('vi_compare_interface_dynamics:LinearAmplitudeSize', ...
+            ['The exact linear amplitude must contain one value per ', ...
+             'comparison time.']);
+    end
+    linearModal = primaryCarrier.* ...
+        ((linearAmplitudeOverH/amplitudeScale)*alignmentPhase);
+end
 
 includeSlaved = option(settings, 'includeSlavedHarmonics', true);
 secondHarmonicModal = complex(zeros(size(wnlPrimaryModal)));
@@ -128,14 +167,23 @@ azimuthSecond = exp(1i*secondHarmonicM*probeTheta);
 azimuthMean = exp(1i*meanM*probeTheta);
 
 linearComplexAtTheta = linearModal*azimuthPrimary;
+if linearUsesRecoveredCarrier
+    linearComplexAtTheta = ...
+        primaryMultiplicity*linearComplexAtTheta;
+end
 wnlPrimaryComplexAtTheta = wnlPrimaryModal*azimuthPrimary;
 wnlSecondComplexAtTheta = ...
+    self_second_multiplicity(coordinateType)* ...
     secondHarmonicModal*azimuthSecond + meanModal*azimuthMean;
+wnlPrimaryComplexAtTheta = ...
+    primaryMultiplicity*wnlPrimaryComplexAtTheta;
 wnlTotalComplexAtTheta = ...
     wnlPrimaryComplexAtTheta + wnlSecondComplexAtTheta;
 
 linearPhysical = real(linearComplexAtTheta);
 wnlPrimaryPhysical = real(wnlPrimaryComplexAtTheta);
+radialCorrectionPhysical = real(primaryMultiplicity* ...
+    radialCorrectionModal*azimuthPrimary);
 wnlSecondPhysical = real(wnlSecondComplexAtTheta);
 wnlTotalPhysical = real(wnlTotalComplexAtTheta);
 difference = linearPhysical-wnlTotalPhysical;
@@ -154,6 +202,7 @@ end
 
 linearProbe = linearPhysical(probeIndex, :).';
 wnlPrimaryProbe = wnlPrimaryPhysical(probeIndex, :).';
+radialCorrectionProbe = radialCorrectionPhysical(probeIndex,:).';
 wnlSecondProbe = wnlSecondPhysical(probeIndex, :).';
 wnlTotalProbe = wnlTotalPhysical(probeIndex, :).';
 probeDifference = linearProbe-wnlTotalProbe;
@@ -196,10 +245,11 @@ thetaSnapshot = linspace(0, 2*pi, numberOfTheta);
 linearSnapshot = real(linearModal(:, snapshotIndex) * ...
     exp(1i*mode.spec.m*thetaSnapshot));
 wnlPrimarySnapshot = real(wnlPrimaryModal(:, snapshotIndex) * ...
-    exp(1i*mode.spec.m*thetaSnapshot));
+    exp(1i*mode.spec.m*thetaSnapshot)*primaryMultiplicity);
 wnlSecondSnapshot = real( ...
     secondHarmonicModal(:, snapshotIndex) * ...
-    exp(1i*secondHarmonicM*thetaSnapshot) + ...
+    exp(1i*secondHarmonicM*thetaSnapshot)* ...
+    self_second_multiplicity(coordinateType) + ...
     meanModal(:, snapshotIndex) * exp(1i*meanM*thetaSnapshot));
 wnlTotalSnapshot = wnlPrimarySnapshot+wnlSecondSnapshot;
 snapshotDifference = linearSnapshot-wnlTotalSnapshot;
@@ -211,8 +261,25 @@ result.description = [ ...
     'Real interface reconstructed with one common peak-amplitude ', ...
     'normalization; WNL contains its Landau-modulated critical mode ', ...
     'and available O(A^2) slaved interface harmonics.'];
+result.initializationConvention = [ ...
+    'available O(A^2) fields are instantaneous slaved-manifold fields ', ...
+    'and are present at the initial plotted time'];
 result.realFieldConvention = ...
-    'zeta/h = real{complex modal representation}';
+    ['self-conjugate modes are real signed fields; distinct conjugate ', ...
+     'pairs are reconstructed as 2*real{complex modal representation}'];
+result.coordinateType = coordinateType;
+result.amplitudeScaleToPeakZetaOverH = amplitudeScale;
+result.radialModeCorrections = {radialModeCorrection};
+result.includedRadialModeCorrections = ...
+    radialModeCorrection.includeInSurfacePattern;
+result.radialCorrectionRelativeL2 = ...
+    radialModeCorrection.relativeCorrectionL2;
+result.selectedPrimaryCarrier = primaryCarrier;
+result.fullPrimaryCarrier = fullPrimaryCarrier;
+result.besselPrimaryCarrier = besselPrimaryCarrier;
+result.radialCorrectionCarrier = radialCorrectionCarrier;
+result.linearReferenceUsesRecoveredCarrier = ...
+    linearUsesRecoveredCarrier;
 result.timeStar = timeStar(:);
 result.forcingPeriods = forcingPeriods(:);
 result.r = radialGrid;
@@ -226,11 +293,17 @@ result.phaseAlignment = alignmentPhase;
 result.normalizedPrimaryCarrierOverlap = normalizedAlignmentOverlap;
 result.linearField = linearPhysical;
 result.wnlPrimaryField = wnlPrimaryPhysical;
+result.availablePrimaryRadialCorrectionField = ...
+    radialCorrectionPhysical;
+result.availablePrimaryRadialCorrectionRelativeL2 = ...
+    norm(radialCorrectionPhysical(:))/ ...
+    max(norm(wnlPrimaryPhysical(:)),1.0e-12);
 result.wnlSecondOrderField = wnlSecondPhysical;
 result.wnlTotalField = wnlTotalPhysical;
 result.differenceLinearMinusWnl = difference;
 result.linearProbeSignal = linearProbe;
 result.wnlPrimaryProbeSignal = wnlPrimaryProbe;
+result.availableRadialCorrectionProbeSignal = radialCorrectionProbe;
 result.wnlSecondOrderProbeSignal = wnlSecondProbe;
 result.wnlTotalProbeSignal = wnlTotalProbe;
 result.probeDifferenceLinearMinusWnl = probeDifference;
@@ -279,10 +352,17 @@ fprintf('  probe RMSE                  = %.6e [zeta/h]\n', ...
     probeRmse);
 fprintf('  O(A^2)/primary relative L2  = %.6e\n', ...
     secondOrderRelativeL2);
+fprintf(['  radial c_n relative L2      = %.6e, ', ...
+    'included=%d (%s)\n'],radialModeCorrection.relativeCorrectionL2, ...
+    radialModeCorrection.includeInSurfacePattern, ...
+    radialModeCorrection.policy);
 
 if option(settings, 'plotInterfaceDynamics', true)
     plot_radial_time_comparison(result);
     plot_interface_snapshot(result, parameters.R0);
+    if option(settings,'plotRadialModeCorrections',true)
+        vi_plot_radial_mode_corrections({radialModeCorrection});
+    end
 end
 end
 
@@ -310,6 +390,14 @@ if isfield(settings, name)
     value = settings.(name);
 else
     value = defaultValue;
+end
+end
+
+function value = self_second_multiplicity(coordinateType)
+if strcmp(coordinateType,'real')
+    value = 1.0;
+else
+    value = 2.0;
 end
 end
 

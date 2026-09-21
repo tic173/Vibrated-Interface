@@ -7,8 +7,9 @@ function [B0, L0, Lplus, Lminus, ...
 %   B0*q_t - L(tau)*q = 0,
 %   L(tau)=L0+Lplus*exp(i*tau)+Lminus*exp(-i*tau).
 % The flat-interface rows are the bulk momentum/divergence equations,
-% rigid-wall and regularity rows, velocity and traction jumps, kinematic
-% condition, and the selected free or pinned contact-line condition.
+% rigid-wall and regularity rows, pressure-compatible normal momentum at
+% the sidewall, velocity and traction jumps, kinematic condition, and the
+% selected free or pinned contact-line condition.
 
 validateattributes(m, {'numeric'}, {'scalar', 'integer', 'finite'});
 d = discretization;
@@ -57,13 +58,15 @@ for ir = 2:nr-1
     A0(lightRows(3), layout.l.w(lightNode)) = 1;
 end
 
-% Axis regularity and the legacy free-slide sidewall conditions. These
+% Axis regularity and the selected sidewall tangential conditions. These
 % rows also cover the radial corners. For a Fourier mode m,
 % u_r +/- i*u_theta have scalar orders |m +/- 1| at the axis.
 [A0, B0] = impose_radial_boundaries(A0, B0, layout.d, ...
-    layout.nzD, nr, d.r, d.Dr, m);
+    layout.nzD, nr, d.r, d.Dr, m, ...
+    d.sidewallTangentialCondition);
 [A0, B0] = impose_radial_boundaries(A0, B0, layout.l, ...
-    layout.nzL, nr, d.r, d.Dr, m);
+    layout.nzL, nr, d.r, d.Dr, m, ...
+    d.sidewallTangentialCondition);
 
 % Join adjacent Chebyshev elements inside each fluid. Both copies of an
 % artificial interface remain in the state vector. The left-copy rows
@@ -197,13 +200,13 @@ if m == 0
     volumeRow = layout.zeta(volumeIr);
     [A0, B0] = clear_rows(A0, B0, volumeRow);
     A0(volumeRow, layout.zeta) = ...
-        trapezoidal_weights(d.r).'.*d.r.';
+        d.radial.quadratureWeights.'.*d.r.';
 end
 
 % Remove the common pressure gauge in the axisymmetric block.
 gaugeRow = [];
 if m == 0
-    gaugeIr = max(2, min(nr-1, ceil(nr/2)));
+    gaugeIr = d.denseGaugeRadialIndex;
     gaugeIz = d.denseGaugeVerticalIndex;
     gaugeNode = grid_index(gaugeIr, gaugeIz, nr);
     gaugeRow = layout.d.p(gaugeNode);
@@ -235,6 +238,11 @@ diagnostics.denseMatchingRows = denseMatchingRows;
 diagnostics.lightMatchingRows = lightMatchingRows;
 diagnostics.numberOfVerticalMatchingRows = ...
     numel(denseMatchingRows)+numel(lightMatchingRows);
+diagnostics.pressureBoundaryTreatment = ...
+    'sidewall normal momentum stored in the pressure equation row';
+diagnostics.sidewallTangentialCondition = ...
+    d.sidewallTangentialCondition;
+diagnostics.linearOperatorVersion = d.linearOperatorVersion;
 end
 
 function [A, B, ops] = layer_operator(nr, nz, r, Dr, Drr, ...
@@ -285,7 +293,7 @@ ops.lap = lap;
 end
 
 function [A, B] = impose_radial_boundaries(A, B, layer, nz, ...
-    nr, r, Dr, m)
+    nr, r, Dr, m, sidewallTangentialCondition)
 orderPlus = abs(m+1);
 orderMinus = abs(m-1);
 for iz = 1:nz
@@ -295,7 +303,15 @@ for iz = 1:nz
         layer.w(axisNode), layer.p(axisNode)];
     sideRows = [layer.ur(sideNode), layer.ut(sideNode), ...
         layer.w(sideNode)];
-    [A, B] = clear_rows(A, B, [axisRows, sideRows]);
+    sidePressureRow = layer.p(sideNode);
+    normalMomentumRow = A(sideRows(1),:);
+    [A, B] = clear_rows(A, B, ...
+        [axisRows, sideRows, sidePressureRow]);
+
+    % The normal velocity condition replaces radial momentum at the wall.
+    % Retain that equation as the pressure compatibility condition in the
+    % pressure row, with no time derivative because u_r=0 for all time.
+    A(sidePressureRow,:) = normalMomentumRow;
 
     radialNodes = grid_index(1, iz, nr):grid_index(nr, iz, nr);
     if orderPlus == 0
@@ -321,9 +337,19 @@ for iz = 1:nz
     end
 
     A(sideRows(1), layer.ur(sideNode)) = 1;
-    A(sideRows(2), layer.ut(sideNode)) = 1;
-    A(sideRows(2), layer.ut(radialNodes)) = ...
-        A(sideRows(2), layer.ut(radialNodes)) + r(end)*Dr(end, :);
+    if strcmp(sidewallTangentialCondition,'stressFree')
+        % With u_r(R,theta,z)=0, its tangential derivative also vanishes.
+        % The exact cylindrical shear condition tau_rtheta=0 therefore is
+        % R*d_r(u_theta)-u_theta=0. Unlike d_r(r*u_theta)=0, this does not
+        % artificially preserve a separable Neumann Bessel mode for m>0.
+        A(sideRows(2), layer.ut(sideNode)) = -1;
+        A(sideRows(2), layer.ut(radialNodes)) = ...
+            A(sideRows(2), layer.ut(radialNodes)) + r(end)*Dr(end, :);
+    else
+        A(sideRows(2), layer.ut(sideNode)) = 1;
+        A(sideRows(2), layer.ut(radialNodes)) = ...
+            A(sideRows(2), layer.ut(radialNodes)) + r(end)*Dr(end, :);
+    end
     A(sideRows(3), layer.w(radialNodes)) = Dr(end, :);
 end
 end
@@ -372,12 +398,4 @@ end
 
 function index = volume_constraint_index(nr)
 index = max(2, min(nr-1, ceil(nr/2)));
-end
-
-function weights = trapezoidal_weights(x)
-x = x(:);
-weights = zeros(size(x));
-weights(1) = (x(2)-x(1))/2;
-weights(end) = (x(end)-x(end-1))/2;
-weights(2:end-1) = (x(3:end)-x(1:end-2))/2;
 end

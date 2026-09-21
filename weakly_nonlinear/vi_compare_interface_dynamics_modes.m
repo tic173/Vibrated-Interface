@@ -27,7 +27,7 @@ amplitudes = orient_amplitudes( ...
 if numberOfModes == 1
     result = vi_compare_interface_dynamics(linearResult, ...
         amplitudes(:, 1), wnlResult, metadata, parameters, ...
-        settings, amplitudeScale);
+        settings, amplitudeScale, linearModeAmplitudesOverH);
     result.numberOfModes = 1;
     result.modeAmplitudesOverH = amplitudes;
     return;
@@ -48,8 +48,20 @@ assert(isfield(metadata, 'discretization') && ...
 assert(isfield(parameters, 'omegaStar') && isfield(parameters, 'R0'), ...
     'parameters.omegaStar and parameters.R0 are required.');
 validateattributes(amplitudeScale, {'numeric'}, ...
-    {'scalar', 'real', 'positive', 'finite'});
+    {'vector', 'real', 'positive', 'finite'});
 modes = wnlResult.modes;
+selfCoordinateTypes = cellfun(@wnl_mode_coordinate_type,modes, ...
+    'UniformOutput',false);
+physicalMultiplicities = wnl_mode_amplitude_scale(modes);
+if isscalar(amplitudeScale)
+    amplitudeScale = repmat(amplitudeScale,numberOfModes,1);
+else
+    amplitudeScale = amplitudeScale(:);
+end
+if numel(amplitudeScale) ~= numberOfModes
+    error('vi_compare_interface_dynamics_modes:AmplitudeScaleSize', ...
+        'Supply one amplitude scale per retained mode.');
+end
 selfResults = wnlResult.self;
 crossResult = wnlResult.cross{1, 2};
 timeStar = linearResult.timeStar(:).';
@@ -59,11 +71,35 @@ radialGrid = metadata.discretization.r(:);
 zetaRows = metadata.layout.zeta;
 
 carriers = cell(2, 1);
+fullCarriers = cell(2,1);
+besselCarriers = cell(2,1);
+correctionCarriers = cell(2,1);
+radialModeCorrections = cell(2,1);
 for modeIndex = 1:2
-    carriers{modeIndex} = interface_carrier( ...
-        modes{modeIndex}.field, zetaRows, ...
-        parameters.omegaStar, timeStar);
+    radialModeCorrections{modeIndex} = ...
+        vi_radial_mode_correction(modes{modeIndex},metadata, ...
+        parameters,settings);
+    frequency = modes{modeIndex}.field.spec.n(:)+ ...
+        modes{modeIndex}.field.spec.s;
+    temporalPhase = exp(1i*frequency* ...
+        (parameters.omegaStar*timeStar));
+    carriers{modeIndex} = ...
+        radialModeCorrections{modeIndex}.selectedCoefficients* ...
+        temporalPhase;
+    fullCarriers{modeIndex} = ...
+        radialModeCorrections{modeIndex}.fullCoefficients* ...
+        temporalPhase;
+    besselCarriers{modeIndex} = ...
+        radialModeCorrections{modeIndex}.separableCoefficients* ...
+        temporalPhase;
+    correctionCarriers{modeIndex} = ...
+        radialModeCorrections{modeIndex}.correctionCoefficients* ...
+        temporalPhase;
     carriers{modeIndex} = carriers{modeIndex}(radialOrder, :);
+    fullCarriers{modeIndex} = fullCarriers{modeIndex}(radialOrder,:);
+    besselCarriers{modeIndex} = besselCarriers{modeIndex}(radialOrder,:);
+    correctionCarriers{modeIndex} = ...
+        correctionCarriers{modeIndex}(radialOrder,:);
 end
 
 linearRadialShape = besselj(modes{1}.spec.m, ...
@@ -83,7 +119,13 @@ alignmentProduct = conj(carriers{1}(:, firstPeriod)).* ...
 overlap = sum(alignmentProduct(:));
 overlapScale = norm(carriers{1}(:, firstPeriod), 'fro')* ...
     norm(linearCarrier(:, firstPeriod), 'fro');
-if abs(overlap) <= eps*max(overlapScale, 1)
+if ~isempty(linearModeAmplitudesOverH)
+    % Both references below use the recovered full-cylinder carriers. Their
+    % amplitudes already occupy the coefficient gauge, so an additional
+    % phase rotation would be inconsistent with phase-sensitive h terms.
+    alignment = 1;
+    normalizedOverlap = abs(overlap)/max(overlapScale,eps);
+elseif abs(overlap) <= eps*max(overlapScale, 1)
     alignment = 1;
     normalizedOverlap = 0;
 else
@@ -91,24 +133,29 @@ else
     normalizedOverlap = abs(overlap)/overlapScale;
 end
 
-modalAmplitudes = amplitudes/amplitudeScale;
+modalAmplitudes = amplitudes./amplitudeScale.';
 modalAmplitudes(:, 1) = modalAmplitudes(:, 1)*alignment;
 linearModeAmplitudes = [];
 linearTwoModeAmplitudes = [];
 if ~isempty(linearModeAmplitudesOverH)
     linearModeAmplitudes = orient_amplitudes( ...
         linearModeAmplitudesOverH, numberOfTimes, numberOfModes);
-    linearTwoModeAmplitudes = linearModeAmplitudes/amplitudeScale;
+    linearTwoModeAmplitudes = ...
+        linearModeAmplitudes./amplitudeScale.';
     linearTwoModeAmplitudes(:, 1) = ...
         linearTwoModeAmplitudes(:, 1)*alignment;
 end
 primaryModal = cell(2, 1);
+radialCorrectionModal = cell(2,1);
 for modeIndex = 1:2
     primaryModal{modeIndex} = carriers{modeIndex}.* ...
         modalAmplitudes(:, modeIndex).';
+    radialCorrectionModal{modeIndex} = ...
+        correctionCarriers{modeIndex}.*modalAmplitudes(:,modeIndex).';
 end
 
-terms = struct('modal', {}, 'm', {}, 'label', {});
+terms = struct('modal', {}, 'm', {}, 'label', {}, ...
+    'physicalMultiplicity',{});
 if get_option(settings, 'includeSlavedHarmonics', true)
     for modeIndex = 1:2
         selfValue = selfResults{modeIndex};
@@ -118,7 +165,9 @@ if get_option(settings, 'includeSlavedHarmonics', true)
             terms(end+1) = make_term(carrier.* ... %#ok<AGROW>
                 (modalAmplitudes(:, modeIndex).'.^2), ...
                 selfValue.qAA.field.spec.m, ...
-                sprintf('mode %d self second harmonic', modeIndex));
+                sprintf('mode %d self second harmonic', modeIndex), ...
+                self_second_multiplicity( ...
+                selfCoordinateTypes{modeIndex}));
         end
         if has_forced_field(selfValue, 'qAbarA')
             carrier = forced_carrier(selfValue.qAbarA, zetaRows, ...
@@ -126,7 +175,7 @@ if get_option(settings, 'includeSlavedHarmonics', true)
             terms(end+1) = make_term(carrier.* ... %#ok<AGROW>
                 (abs(modalAmplitudes(:, modeIndex).').^2), ...
                 selfValue.qAbarA.field.spec.m, ...
-                sprintf('mode %d mean', modeIndex));
+                sprintf('mode %d mean', modeIndex),1.0);
         end
     end
     if isstruct(crossResult) && has_forced_field(crossResult, 'qAB')
@@ -134,14 +183,17 @@ if get_option(settings, 'includeSlavedHarmonics', true)
             parameters.omegaStar, timeStar, radialOrder);
         terms(end+1) = make_term(carrier.* ... %#ok<AGROW>
             (modalAmplitudes(:, 1).*modalAmplitudes(:, 2)).', ...
-            crossResult.qAB.field.spec.m, 'mode sum interaction');
+            crossResult.qAB.field.spec.m, 'mode sum interaction', ...
+            stored_cross_multiplicity(selfCoordinateTypes{1}));
     end
     if isstruct(crossResult) && has_forced_field(crossResult, 'qAbarB')
         carrier = forced_carrier(crossResult.qAbarB, zetaRows, ...
             parameters.omegaStar, timeStar, radialOrder);
         terms(end+1) = make_term(carrier.* ... %#ok<AGROW>
             (modalAmplitudes(:, 1).*conj(modalAmplitudes(:, 2))).', ...
-            crossResult.qAbarB.field.spec.m, 'mode difference interaction');
+            crossResult.qAbarB.field.spec.m, ...
+            'mode difference interaction', ...
+            stored_cross_multiplicity(selfCoordinateTypes{1}));
     end
 end
 
@@ -155,22 +207,31 @@ else
     for modeIndex = 1:2
         linearComplex = linearComplex + carriers{modeIndex}.* ...
             linearTwoModeAmplitudes(:, modeIndex).' * ...
-            exp(1i*modes{modeIndex}.spec.m*probeTheta);
+            exp(1i*modes{modeIndex}.spec.m*probeTheta) * ...
+            physicalMultiplicities(modeIndex);
     end
 end
 primaryComplex = complex(zeros(size(linearComplex)));
+radialCorrectionComplex = complex(zeros(size(linearComplex)));
 for modeIndex = 1:2
     primaryComplex = primaryComplex + primaryModal{modeIndex}* ...
-        exp(1i*modes{modeIndex}.spec.m*probeTheta);
+        exp(1i*modes{modeIndex}.spec.m*probeTheta)* ...
+        physicalMultiplicities(modeIndex);
+    radialCorrectionComplex = radialCorrectionComplex + ...
+        radialCorrectionModal{modeIndex}* ...
+        exp(1i*modes{modeIndex}.spec.m*probeTheta)* ...
+        physicalMultiplicities(modeIndex);
 end
 secondComplex = complex(zeros(size(linearComplex)));
 for termIndex = 1:numel(terms)
     secondComplex = secondComplex + terms(termIndex).modal* ...
-        exp(1i*terms(termIndex).m*probeTheta);
+        exp(1i*terms(termIndex).m*probeTheta)* ...
+        terms(termIndex).physicalMultiplicity;
 end
 totalComplex = primaryComplex+secondComplex;
 linearPhysical = real(linearComplex);
 primaryPhysical = real(primaryComplex);
+radialCorrectionPhysical = real(radialCorrectionComplex);
 secondPhysical = real(secondComplex);
 totalPhysical = real(totalComplex);
 difference = linearPhysical-totalPhysical;
@@ -187,6 +248,7 @@ else
     probeSelection = 'nearest radial collocation point';
 end
 wnlPrimaryModeProbeSignals = zeros(numberOfTimes, numberOfModes);
+radialCorrectionModeProbeSignals = zeros(numberOfTimes,numberOfModes);
 linearModeProbeSignals = [];
 if ~isempty(linearTwoModeAmplitudes)
     linearModeProbeSignals = zeros(numberOfTimes, numberOfModes);
@@ -194,9 +256,15 @@ end
 for modeIndex = 1:numberOfModes
     azimuthalPhase = exp(1i*modes{modeIndex}.spec.m*probeTheta);
     wnlPrimaryModeProbeSignals(:,modeIndex) = real( ...
+        physicalMultiplicities(modeIndex)* ...
         primaryModal{modeIndex}(probeIndex,:)*azimuthalPhase).';
+    radialCorrectionModeProbeSignals(:,modeIndex) = real( ...
+        physicalMultiplicities(modeIndex)* ...
+        radialCorrectionModal{modeIndex}(probeIndex,:)* ...
+        azimuthalPhase).';
     if ~isempty(linearTwoModeAmplitudes)
         linearModeProbeSignals(:,modeIndex) = real( ...
+            physicalMultiplicities(modeIndex)* ...
             carriers{modeIndex}(probeIndex,:).* ...
             linearTwoModeAmplitudes(:,modeIndex).' * ...
             azimuthalPhase).';
@@ -242,7 +310,8 @@ else
         linearSnapshot = linearSnapshot + ...
             carriers{modeIndex}(:, snapshotIndex) * ...
             linearTwoModeAmplitudes(snapshotIndex, modeIndex) * ...
-            exp(1i*modes{modeIndex}.spec.m*theta);
+            exp(1i*modes{modeIndex}.spec.m*theta) * ...
+            physicalMultiplicities(modeIndex);
     end
     linearSnapshot = real(linearSnapshot);
 end
@@ -250,13 +319,15 @@ primarySnapshot = complex(zeros(numel(radialGrid), numberOfTheta));
 for modeIndex = 1:2
     primarySnapshot = primarySnapshot + ...
         primaryModal{modeIndex}(:, snapshotIndex)* ...
-        exp(1i*modes{modeIndex}.spec.m*theta);
+        exp(1i*modes{modeIndex}.spec.m*theta)* ...
+        physicalMultiplicities(modeIndex);
 end
 secondSnapshot = complex(zeros(size(primarySnapshot)));
 for termIndex = 1:numel(terms)
     secondSnapshot = secondSnapshot + ...
         terms(termIndex).modal(:, snapshotIndex)* ...
-        exp(1i*terms(termIndex).m*theta);
+        exp(1i*terms(termIndex).m*theta)* ...
+        terms(termIndex).physicalMultiplicity;
 end
 primarySnapshot = real(primarySnapshot);
 secondSnapshot = real(secondSnapshot);
@@ -267,8 +338,24 @@ result.nonlinearModelLabel = get_option( ...
     settings, 'nonlinearModelLabel', 'WNL');
 result.description = ['Two-mode real interface: both primary modes plus ', ...
     'available self and cross O(A^2) slaved fields.'];
+result.initializationConvention = [ ...
+    'available O(A^2) fields are instantaneous slaved-manifold fields ', ...
+    'and are present at the initial plotted time'];
 result.realFieldConvention = ...
-    'zeta/h = real{complex modal representation}';
+    ['self-conjugate modes are real signed fields; distinct conjugate ', ...
+     'pairs are reconstructed as 2*real{complex modal representation}'];
+result.coordinateTypes = selfCoordinateTypes;
+result.amplitudeScalesToPeakZetaOverH = amplitudeScale;
+result.physicalMultiplicities = physicalMultiplicities;
+result.radialModeCorrections = radialModeCorrections;
+result.selectedPrimaryCarriers = carriers;
+result.fullPrimaryCarriers = fullCarriers;
+result.besselPrimaryCarriers = besselCarriers;
+result.radialCorrectionCarriers = correctionCarriers;
+result.includedRadialModeCorrections = cellfun(@(value) ...
+    value.includeInSurfacePattern,radialModeCorrections);
+result.radialCorrectionRelativeL2 = cellfun(@(value) ...
+    value.relativeCorrectionL2,radialModeCorrections);
 result.numberOfModes = 2;
 result.modeAmplitudesOverH = amplitudes;
 result.linearModeAmplitudesOverH = linearModeAmplitudes;
@@ -300,6 +387,11 @@ result.phaseAlignment = [alignment; 1];
 result.normalizedPrimaryCarrierOverlap = normalizedOverlap;
 result.linearField = linearPhysical;
 result.wnlPrimaryField = primaryPhysical;
+result.availablePrimaryRadialCorrectionField = ...
+    radialCorrectionPhysical;
+result.availablePrimaryRadialCorrectionRelativeL2 = ...
+    norm(radialCorrectionPhysical(:))/ ...
+    max(norm(primaryPhysical(:)),1.0e-12);
 result.wnlSecondOrderField = secondPhysical;
 result.wnlTotalField = totalPhysical;
 result.differenceLinearMinusWnl = difference;
@@ -307,6 +399,8 @@ result.linearProbeSignal = linearProbe;
 result.linearModeProbeSignals = linearModeProbeSignals;
 result.wnlPrimaryProbeSignal = primaryProbe;
 result.wnlPrimaryModeProbeSignals = wnlPrimaryModeProbeSignals;
+result.availableRadialCorrectionModeProbeSignals = ...
+    radialCorrectionModeProbeSignals;
 result.wnlSecondOrderProbeSignal = secondProbe;
 result.wnlTotalProbeSignal = totalProbe;
 result.probeDifferenceLinearMinusWnl = probeDifference;
@@ -346,10 +440,20 @@ if get_option(settings, 'verbose', true)
     fprintf('  field relative L2 error      = %.6e\n', fieldRelativeL2);
     fprintf('  O(A^2)/primary relative L2   = %.6e\n', ...
         result.secondOrderRelativeL2);
+    for modeIndex = 1:numberOfModes
+        fprintf(['  radial c_n mode %d: relative L2 %.6e, ', ...
+            'included=%d (%s)\n'],modeIndex, ...
+            radialModeCorrections{modeIndex}.relativeCorrectionL2, ...
+            radialModeCorrections{modeIndex}.includeInSurfacePattern, ...
+            radialModeCorrections{modeIndex}.policy);
+    end
 end
 
 if get_option(settings, 'plotInterfaceDynamics', true)
     plot_two_mode_fields(result, parameters.R0);
+    if get_option(settings,'plotRadialModeCorrections',true)
+        vi_plot_radial_mode_corrections(radialModeCorrections);
+    end
 end
 end
 
@@ -385,8 +489,28 @@ flag = isstruct(value) && isfield(value, name) && ...
     ~isempty(value.(name).field);
 end
 
-function term = make_term(modal, m, label)
-term = struct('modal', modal, 'm', m, 'label', label);
+function term = make_term(modal, m, label, physicalMultiplicity)
+term = struct('modal', modal, 'm', m, 'label', label, ...
+    'physicalMultiplicity',physicalMultiplicity);
+end
+
+function value = self_second_multiplicity(coordinateType)
+if strcmp(coordinateType,'real')
+    value = 1.0;
+else
+    value = 2.0;
+end
+end
+
+function value = stored_cross_multiplicity(firstCoordinateType)
+% cross{1,2} stores one member of each conjugate pair when mode 1 is
+% complex. When mode 1 is real and mode 2 is complex, q_AB and q_AbarB are
+% already the two conjugate members, so each must appear only once.
+if strcmp(firstCoordinateType,'real')
+    value = 1.0;
+else
+    value = 2.0;
+end
 end
 
 function value = get_option(settings, name, defaultValue)

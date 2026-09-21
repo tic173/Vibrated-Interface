@@ -24,9 +24,15 @@
 % the known Bessel branches, while the vertical direction may use one global
 % Chebyshev grid or several matched elements. Always check convergence in N,
 % Nr, the vertical element sizes, Ntheta, and the directional-
-% differentiation steps before using g.
+% differentiation steps before using g or h.
 
-clearvars;
+if exist('viWnlInputOverride','var') && ...
+        isstruct(viWnlInputOverride)
+    requestedInputOverride = viWnlInputOverride;
+else
+    requestedInputOverride = struct();
+end
+clearvars -except requestedInputOverride;
 close all;
 clc;
 
@@ -56,6 +62,9 @@ input.execution.nonlinearTemporalOversampling = 2.0;
 input.execution.adaptiveDirectionalSteps = true;
 input.execution.quadraticStepMultipliers = [1,2,4,8];
 input.execution.cubicStepMultipliers = [1,2,4];
+% Once three adjacent step sizes give Richardson estimates agreeing below
+% this relative tolerance, later quadratic step sizes are unnecessary.
+input.execution.directionalStepEarlyStopTolerance = 1.0e-8;
 
 % Dimensional physical inputs.  The script calculates omegaStar, R0, C,
 % Bd, At, and eta from these values; do not enter them separately.
@@ -87,10 +96,13 @@ input.linear.gammaGuess = [];             % [] -> i*s*omegaStar
 input.linear.numberOfPeriods = 20;
 input.linear.samplesPerPeriod = 200;
 
-% Initial conditions for the retained Floquet-mode amplitudes. The entries
-% are A_j(0)=(amplitude/h)*exp(i*phase). Only the first numberOfModes entries
-% are used. A mode initialized at exactly zero remains zero in the
-% nonresonant Landau model because every right-hand-side term contains A_j.
+% Initial conditions are physical peak interface displacements divided by
+% h. A distinct azimuthal/conjugate pair uses
+% A_j(0)=(amplitude/h)*exp(i*phase). A self-conjugate axisymmetric H/SH mode
+% has one real signed coordinate, so its phase must be 0 or pi modulo 2*pi.
+% Only the first numberOfModes entries are used. A mode initialized at
+% exactly zero remains zero because every retained cubic term contains that
+% amplitude or its conjugate.
 input.initialConditions.amplitudesOverH = [1.0e-3; 1.0e-3];
 input.initialConditions.phases = [0.0; 0.0*pi/2];  % radians
 
@@ -116,7 +128,8 @@ input.numberOfModes = 2;
 % line root calculation. In the default operating-point formulation, the
 % two modes may have different individual critical accelerations: each is
 % recomputed at input.forcing.analysisAmplitude and the code returns the
-% full cross-coupling matrix g(j,k) at that common physical acceleration.
+% supported cubic matrices g(j,k) and h(j,k) at that common physical
+% acceleration.
 input.modes(1).m = 0;
 input.modes(1).radialIndex = 6;
 input.modes(1).s = 0.5;
@@ -202,6 +215,15 @@ input.numerics.radialGrid.type = 'besselEnriched';
 input.numerics.radialGrid.maximumProductOrder = 2;
 input.numerics.radialGrid.maximumConditionNumber = 1.0e10;
 input.numerics.radialGrid.independenceTolerance = 1.0e-10;
+% Optional fixed Bessel-enrichment library. Leave empty for a standalone
+% calculation. For comparisons among different retained pairs, supply one
+% common structure array with fields m and radialIndex; every pair then uses
+% identical radial differentiation matrices. These are basis references,
+% not additional retained amplitudes.
+input.numerics.radialGrid.referenceModes = [];
+% A refined run may preserve a coarser run's selected basis labels and append
+% new independent functions. This makes Nr convergence spaces nested.
+input.numerics.radialGrid.preferredBasisLabels = {};
 % false prevents an ill-conditioned Bessel basis from silently reverting to
 % Chebyshev. Set true only when an automatic compatibility fallback is wanted.
 input.numerics.radialGrid.fallbackToChebyshev = false;
@@ -245,6 +267,14 @@ input.numerics.minimumStokesLayerPoints = 4;
 % J'_m(beta*R0)=0 radial branches in the linear preview. 'pinned' uses
 % zeta=0 at the contact line at every perturbation order.
 input.boundary.contactLine = 'free';
+% Tangential velocity condition at the cylindrical sidewall:
+%   'stressFree'       : true cylindrical zero shear,
+%                        R*d_r(u_theta)-u_theta=0 and d_r(w)=0;
+%   'legacyFreeSlide' : d_r(r*u_theta)=0 and d_r(w)=0, which makes the
+%                        Neumann Bessel seed artificially separable.
+% For stressFree and m>0, the full recovery is allowed to modify every
+% radial Floquet harmonic; those departures are recorded as c_n(r).
+input.boundary.sidewallTangentialCondition = 'stressFree';
 
 % Optional parameter derivative used in mu=<psi,P*phi>. At an operating
 % point mu is a tangent diagnostic; the amplitude ODE uses the exact lambda_j
@@ -255,10 +285,8 @@ input.detuning.direction = 1.0;
 
 % Linear/WNL comparison. The operator P must represent the derivative with
 % respect to one unit of a/g0 for deltaA*mu to predict the linear growth
-% rate. If one WNL amplitude unit corresponds to S units of zeta/h, enter
-% S below. This scaling changes the cubic coefficient expressed in zeta/h,
-% but it does not affect the growth-rate comparison.
-input.comparison.zetaOverHPerUnitAmplitude = 1.0;
+% rate. Modal normalization is determined automatically: S=1 for a
+% self-conjugate real mode and S=2 for a distinct complex/conjugate pair.
 % Warn, but do not stop, when the requested operating point is far from the
 % neutral WNL expansion point. The exact linear result remains valid.
 input.comparison.wnlDetuningWarningRatio = 0.10;
@@ -278,10 +306,19 @@ input.comparison.endForcingPeriod = 6.0;
 % azimuthal-harmonic corrections.
 input.comparison.plotInterfaceDynamics = true;
 input.comparison.includeSlavedHarmonics = true;
+% Decompose each recovered primary harmonic as
+%   zeta_n(r)=b_n*J_m(beta*r)+c_n(r)
+% using the cylindrical integral weight r*dr. 'auto' includes c_n in the
+% plotted/reconstructed surface when its space-time relative L2 norm is at
+% least the threshold. Use 'always' or 'never' for controlled comparisons.
+input.comparison.radialCorrectionPolicy = 'auto';
+input.comparison.radialCorrectionRelativeL2Threshold = 1.0e-2;
+input.comparison.radialCorrectionTemporalSamples = 128;
+input.comparison.plotRadialModeCorrections = true;
 input.comparison.probeRadiusOverR = 0.4477358;
 % input.comparison.probeRadiusOverR = 0;
 input.comparison.probeTheta = 0.0;
-% The default snapshot is the end of the four-period comparison window.
+% The default snapshot is the end of the configured comparison window.
 % Empty instead selects the instant with the largest radial L2 difference
 % inside that window.
 input.comparison.snapshotForcingPeriod = 6.0;
@@ -336,6 +373,23 @@ input.options.modeTrackingMinimumConstraint = 1.0e-8;
 % modeTrackingMaxIterations before the physical adjoint residual passes,
 % it restarts from the current iterate this many times.
 input.options.adjointBorderedMaxRestarts = 3;
+% First try the cylinder's exact low-rank temporal Schur reconstruction of
+% the adjoint. It is accepted only when the complete unequilibrated A'*left
+% residual passes the same coefficient gate; otherwise the bordered
+% block-GMRES/LSQR path below remains the automatic fallback.
+input.options.adjointUseModelSolver = true;
+% Each equal-order primitive temporal block has pressure-only numerical null
+% directions. Remove only that subspace with a minimum-norm border before
+% forming the adjoint Schur complement. The complete unmodified A'*left
+% residual remains the coefficient acceptance test.
+input.options.adjointCylinderSchurUseNullspaceBordering = true;
+input.options.adjointCylinderSchurNullTolerance = 1.0e-12;
+input.options.adjointCylinderSchurMaximumNullity = 8;
+input.options.adjointCylinderSchurBlockRefinementSteps = 2;
+input.options.adjointCylinderSchurFactorResidualTolerance = 1.0e-8;
+% Self-conjugate forced fields may retain roundoff/iterative contamination.
+% Symmetry projection is accepted only below this relative defect.
+input.options.realFieldConjugacyTolerance = 1.0e-5;
 % Primary adjoint solver: factor each uncoupled temporal harmonic block and
 % include the direct-mode column and normalization row through a scalar
 % Schur complement. This bordered block-Jacobi preconditioner reduces the
@@ -413,6 +467,18 @@ input.options.forcedCylinderSchurBlockRegularization = 1.0e-12;
 input.options.forcedCylinderSchurBlockRegularizationGrowth = 10.0;
 input.options.forcedCylinderSchurBlockRegularizationAttempts = 5;
 input.options.forcedCylinderSchurBlockMaximumInverseGain = 1.0e12;
+% Complete pressure-only temporal nullspaces with an exact minimum-norm
+% border before using the whole-matrix diagonal shift above.
+input.options.forcedCylinderSchurUseNullspaceBordering = true;
+input.options.forcedCylinderSchurNullTolerance = 1.0e-12;
+input.options.forcedCylinderSchurMaximumNullity = 8;
+% Equal-order axisymmetric blocks retain pressure-only null vectors. Accept
+% an m=0 field in the certified pressure quotient only when the remaining
+% physical residual passes 1e-6 and the separately reported compatibility
+% component is below this conservative ceiling. Nonaxisymmetric fields and
+% uncertified nullspaces continue to use the complete residual unchanged.
+input.options.forcedCylinderSchurUsePressureCompatibilityProjection = true;
+input.options.forcedCylinderSchurPressureCompatibilityTolerance = 1.0e-5;
 % The V39 temporal-block GMRES path was much slower for the two-mode
 % cylinder and still fell back to LSQMINNORM.  Keep it off for this case.
 % It remains available for small or demonstrably well-preconditioned
@@ -426,6 +492,11 @@ input.options.forcedBlockRegularization = 1.0e-6;
 input.options.forcedBlockRegularizationGrowth = 10.0;
 input.options.forcedBlockRegularizationAttempts = 5;
 input.options.forcedBlockMaximumInverseGain = 1.0e10;
+% Stop repeated LSQR correction chunks after they cease improving the
+% original, unequilibrated equation residual. This does not alter its gate.
+input.options.forcedRefinementChunkIterations = 1000;
+input.options.forcedRefinementStagnationChunks = 2;
+input.options.forcedRefinementMinimumChunkImprovement = 1.0e-3;
 % In the two-mode case, reuse the two self means, the common sum field, and
 % a conjugate difference field after checking it with the full operator.
 % Set false only for an explicit duplicate-solve verification run.
@@ -566,10 +637,17 @@ input.run.compareLinearAndWNL = true;
 input.run.operatorFactory = 'cylinder_wnl_operators';
 input.run.plotHarmonicNorms = true;
 input.run.saveResults = true;
+% 'compact' is the normal restart/postprocessing cache. It keeps recovered
+% direct/adjoint vectors, coefficients, interface fields, and scalar solve
+% diagnostics, while omitting reconstructible operator matrices and
+% duplicate conjugate/neutral mode copies. Use 'full' only when complete
+% operator and nonlinear-forcing vectors are needed for forensic debugging.
+input.run.saveProfile = 'compact';
 % 'auto' creates a compact deterministic coefficient-cache name from forcing
 % amplitude, frequency, and retained (m,l) mode indices. Initial amplitudes
-% and phases do not enter the filename because lambda_j and g(j,k) can be
-% reused by vi_saved_small_amplitude_transient for different initial states.
+% and phases do not enter the filename because lambda_j, g(j,k), and h(j,k)
+% can be reused by vi_saved_small_amplitude_transient for different initial
+% states.
 % After a matching cache exists, postprocess the current USER INPUTS with:
 %   transientResult = vi_saved_small_amplitude_transient(input);
 % Detailed geometry, Floquet behavior, discretization, comparison duration,
@@ -590,6 +668,11 @@ repositoryRoot = fileparts(wnlDirectory);
 addpath(repositoryRoot);
 addpath(wnlDirectory);
 addpath(examplesDirectory);
+if ~isempty(fieldnames(requestedInputOverride))
+    input = vi_wnl_merge_input(input,requestedInputOverride);
+    fprintf('Applied programmatic WNL input override.\n');
+end
+clear requestedInputOverride;
 
 runWallClock = tic;
 userInput = input;
@@ -639,7 +722,7 @@ validateattributes(input.run.postprocessSavedCoefficientsOnly, ...
 if logical(input.run.postprocessSavedCoefficientsOnly)
     result = vi_saved_small_amplitude_transient(input);
     output = struct();
-    output.codeRelease = 'V55-fast-coupled-envelope-postprocessor';
+    output.codeRelease = 'V70-projected-real-forced-field-gate';
     output.userInput = userInput;
     output.input = input;
     output.comparison = result;
@@ -719,7 +802,8 @@ if useSmallAmplitudeTransient && ~useOperatingPointWnl
     error('vi_wnl_user_run:SmallAmplitudeNeedsOperatingPoint', ...
         ['The small-amplitude transient requires ', ...
          'input.weaklyNonlinear.reference=''analysisAmplitude'' so that ', ...
-         'lambda_j and g(j,k) are evaluated at the requested acceleration.']);
+         'lambda_j, g(j,k), and h(j,k) are evaluated at the requested ', ...
+         'acceleration.']);
 end
 if useSmallAmplitudeTransient
     validateattributes(input.comparison.maximumRelativeCubicCorrection, ...
@@ -950,7 +1034,7 @@ if input.run.linearPreview
         fprintf('  WNL detuning from critical   = %+.12g g0\n', ...
             analysisAmplitudeInfo.detuningFromCritical);
         if useOperatingPointWnl
-            fprintf(['  WNL lambda_j, modes, and g(j,k) will be ', ...
+            fprintf(['  WNL lambda_j, modes, g(j,k), and h(j,k) will be ', ...
                 'evaluated at the requested amplitude.\n']);
         else
             fprintf(['  WNL mu and g remain evaluated at the neutral ', ...
@@ -1350,6 +1434,10 @@ if input.run.weaklyNonlinear
         fprintf('  contact line               = %s\n', ...
             operatorMetadata.contactLine);
     end
+    if isfield(operatorMetadata,'sidewallTangentialCondition')
+        fprintf('  sidewall tangential model  = %s\n', ...
+            operatorMetadata.sidewallTangentialCondition);
+    end
     fprintf('  Nr, NzLower, NzUpper       = %d, %d, %d\n', ...
         operatorMetadata.layout.nr, operatorMetadata.layout.nzD, ...
         operatorMetadata.layout.nzL);
@@ -1386,10 +1474,24 @@ if input.run.weaklyNonlinear
             specS = operatingPointModes{j}.s;
         end
         specs{j} = model.makeSpec(selected.m, specS, selected.label);
+        exactSeparableBesselInterface = ...
+            strcmpi(input.boundary.contactLine,'free') && ...
+            (selected.m == 0 || strcmp( ...
+            operatorMetadata.sidewallTangentialCondition, ...
+            'legacyFreeSlide'));
+        specs{j}.exactSeparableBesselInterface = ...
+            exactSeparableBesselInterface;
         if useOperatingPointWnl
             specs{j}.lambda = operatingPointModes{j}.lambda;
-            specs{j}.reducedReferenceLambda = ...
-                operatingPointModes{j}.lambda;
+            if exactSeparableBesselInterface
+                specs{j}.reducedReferenceLambda = ...
+                    operatingPointModes{j}.lambda;
+            else
+                % The reduced Bessel model is a branch seed, not an exact
+                % eigenvalue reference for the true curved-wall stress.
+                specs{j}.besselSeedReferenceLambda = ...
+                    operatingPointModes{j}.lambda;
+            end
             specs{j}.operatingExponent = ...
                 operatingPointModes{j}.gamma;
             specs{j}.referenceAmplitude = p.aAnalysis;
@@ -1491,6 +1593,33 @@ if input.run.weaklyNonlinear
             radialSeed*temporalSeed;
         specs{j}.directSeed = seedCoefficients(:);
         specs{j}.directSeedSource = seedSource;
+        if exactSeparableBesselInterface && selected.m == 0 && ...
+                hasReducedTemporalSeed
+            [analyticDirectSeed,analyticSeedDiagnostics] = ...
+                vi_axisymmetric_separable_direct(specs{j}, ...
+                temporalSeed,operatorMetadata,operatorParameters);
+            specs{j}.directSeed = analyticDirectSeed;
+            specs{j}.directSeedSource = ...
+                'analytic separable axisymmetric full-state lift';
+            specs{j}.useDirectSeedAsRefinementState = true;
+            specs{j}.analyticDirectSeedDiagnostics = ...
+                analyticSeedDiagnostics;
+        end
+        if isfield(selected,'directSeed') && ...
+                ~isempty(selected.directSeed)
+            specs{j}.directSeed = selected.directSeed(:);
+            specs{j}.directSeedSource = ...
+                'user-supplied full-state refinement seed';
+            specs{j}.useDirectSeedAsRefinementState = true;
+            if isfield(selected,'directSeedDiagnostics')
+                specs{j}.directSeedDiagnostics = ...
+                    selected.directSeedDiagnostics;
+            end
+        end
+        if isfield(selected,'leftSeed') && ~isempty(selected.leftSeed)
+            specs{j}.left = selected.leftSeed(:);
+            specs{j}.leftSeedSource = 'user-supplied full-state adjoint seed';
+        end
         if hasReducedTemporalSeed
             specs{j}.reducedModeDiagnostics = reducedSeedDiagnostics;
             if ~useOperatingPointWnl
@@ -1498,15 +1627,17 @@ if input.run.weaklyNonlinear
                     reducedSeedDiagnostics;
             end
         end
-        if strcmpi(input.boundary.contactLine, 'free') && ...
-                hasReducedTemporalSeed
-            % The reduced free-contact-line solve is the Schur complement
-            % for these zeta coefficients. Hold them fixed while lifting
-            % the complete velocity-pressure state from the full operator.
+        if exactSeparableBesselInterface && hasReducedTemporalSeed
+            % The reduced free-line solve is exact for the legacy separable
+            % wall and for m=0 under either tangential-wall formula. Hold the
+            % Bessel interface fixed while lifting/refining the remaining
+            % primitive variables so numerical recovery cannot manufacture
+            % a nonseparable axisymmetric surface component.
             specs{j}.prescribedDofs = operatorMetadata.layout.zeta;
+            specs{j}.preservePrescribedDofsDuringRefinement = true;
         end
         fprintf('  mode-tracking seed %-12s = %s\n', ...
-            selected.label, seedSource);
+            selected.label, specs{j}.directSeedSource);
 
         % Optional mode seeds supplied by the factory.  Each cell must be a
         % full Floquet vector with ndof*numel(spec.n) entries.
@@ -1818,7 +1949,7 @@ if input.run.weaklyNonlinear
                 ['The full-state Floquet mode has not met the requested ', ...
                  'linear residual tolerance. Increase Nr/Nz/N and ', ...
                  'check that the full and reduced operating-point ', ...
-                 'eigenpairs agree before using g.']);
+                 'eigenpairs agree before using g or h.']);
         end
     else
         wnlResult = wnl_analyze_mode_set(model, specs, opts);
@@ -1836,6 +1967,27 @@ if input.run.weaklyNonlinear
         end
     end
     if ~isempty(wnlResult)
+        if isfield(wnlResult,'mode')
+            radialModes = {wnlResult.mode};
+        elseif isfield(wnlResult,'modes')
+            radialModes = wnlResult.modes(:);
+        else
+            radialModes = {};
+        end
+        radialModeCorrections = cell(numel(radialModes),1);
+        for radialModeIndex = 1:numel(radialModes)
+            radialModeCorrections{radialModeIndex} = ...
+                vi_radial_mode_correction(radialModes{radialModeIndex}, ...
+                operatorMetadata,p,input.comparison);
+            fprintf(['Radial correction %-20s: ||c_n||/||zeta_n|| ', ...
+                '= %.6e, peak fraction %.6e, included=%d (%s)\n'], ...
+                radialModes{radialModeIndex}.spec.label, ...
+                radialModeCorrections{radialModeIndex}.relativeCorrectionL2, ...
+                radialModeCorrections{radialModeIndex}.peakCorrectionFraction, ...
+                radialModeCorrections{radialModeIndex}.includeInSurfacePattern, ...
+                radialModeCorrections{radialModeIndex}.policy);
+        end
+        wnlResult.radialModeCorrections = radialModeCorrections;
         % The reduced interface solve supplies the initial operating-point
         % exponent, but the full primitive-variable recovery may shift it.
         % Classify the slow-envelope regime using the exponent that actually
@@ -1877,7 +2029,8 @@ if input.run.weaklyNonlinear
             else
                 wnlResult.amplitudeEquation = ...
                     ['dA_j/dt = lambda_j*A_j + sum_k ', ...
-                     'g(j,k)*A_j*abs(A_k)^2'];
+                     '[g(j,k)*A_j*abs(A_k)^2 + ', ...
+                     'h(j,k)*conj(A_j)*A_k^2]'];
             end
             wnlResult.reducedOperatingPointModes = ...
                 operatingPointModes;
@@ -1888,13 +2041,35 @@ if input.run.weaklyNonlinear
         end
         if isfield(wnlResult,'forcedSolvesValid') && ...
                 isfield(wnlResult,'validCubicScaling')
+            coefficientMask = true(size(wnlResult.g));
+            if isfield(wnlResult,'coefficientComputed') && ...
+                    isequal(size(wnlResult.coefficientComputed), ...
+                    size(coefficientMask))
+                coefficientMask = logical( ...
+                    wnlResult.coefficientComputed);
+            end
+            phaseSensitiveValues = 0;
+            if isfield(wnlResult,'phaseSensitiveG')
+                phaseSensitiveValues = wnlResult.phaseSensitiveG;
+            end
+            coefficientValues = wnlResult.g(coefficientMask);
+            if isequal(size(phaseSensitiveValues),size(coefficientMask))
+                phaseSensitiveValues = ...
+                    phaseSensitiveValues(coefficientMask);
+            end
             coefficientValuesFinite = isfield(wnlResult,'g') && ...
-                all(isfinite(real(wnlResult.g(:)))) && ...
-                all(isfinite(imag(wnlResult.g(:))));
-            numericalCoefficientValidity = ...
-                all(wnlResult.forcedSolvesValid(:)) && ...
-                all(wnlResult.validCubicScaling(:)) && ...
+                all(isfinite(real(coefficientValues(:)))) && ...
+                all(isfinite(imag(coefficientValues(:)))) && ...
+                all(isfinite(real(phaseSensitiveValues(:)))) && ...
+                all(isfinite(imag(phaseSensitiveValues(:))));
+            requestedCoefficientValidity = ...
+                all(wnlResult.forcedSolvesValid(coefficientMask)) && ...
+                all(wnlResult.validCubicScaling(coefficientMask)) && ...
                 coefficientValuesFinite;
+            fullCoefficientMatrixComputed = all(coefficientMask(:));
+            numericalCoefficientValidity = ...
+                requestedCoefficientValidity && ...
+                fullCoefficientMatrixComputed;
             if isfield(wnlResult,'quadraticResonances')
                 noQuadraticResonance = ...
                     isempty(wnlResult.quadraticResonances);
@@ -1904,11 +2079,21 @@ if input.run.weaklyNonlinear
             else
                 noQuadraticResonance = false;
             end
-            exploratoryCoefficientAvailability = ...
+            requestedExploratoryCoefficientAvailability = ...
                 isfield(wnlResult,'forcedSolvesExploratoryUsable') && ...
-                all(wnlResult.forcedSolvesExploratoryUsable(:)) && ...
+                all(wnlResult.forcedSolvesExploratoryUsable( ...
+                coefficientMask)) && ...
                 coefficientValuesFinite && ...
                 noQuadraticResonance;
+            exploratoryCoefficientAvailability = ...
+                requestedExploratoryCoefficientAvailability && ...
+                fullCoefficientMatrixComputed;
+            wnlResult.requestedCoefficientValidity = ...
+                requestedCoefficientValidity;
+            wnlResult.requestedExploratoryCoefficientAvailability = ...
+                requestedExploratoryCoefficientAvailability;
+            wnlResult.fullCoefficientMatrixComputed = ...
+                fullCoefficientMatrixComputed;
             wnlResult.numericalCoefficientValidity = ...
                 numericalCoefficientValidity;
             wnlResult.exploratoryCoefficientAvailability = ...
@@ -1921,9 +2106,12 @@ if input.run.weaklyNonlinear
                 useOperatingPointWnl && ...
                 (numericalCoefficientValidity || ...
                 exploratoryCoefficientAvailability);
-            fprintf(['WNL validity: forced/coefficient=%d, ', ...
+            fprintf(['WNL validity: requested-coefficient=%d, ', ...
+                'full-matrix=%d, forced/coefficient=%d, ', ...
                 'exploratory-available=%d, slow-envelope=%d, ', ...
                 'envelope-quantitative=%d, small-amplitude-transient=%d\n'], ...
+                requestedCoefficientValidity, ...
+                fullCoefficientMatrixComputed, ...
                 numericalCoefficientValidity, ...
                 exploratoryCoefficientAvailability,slowEnvelopeValid, ...
                 wnlResult.quantitativelyValid, ...
@@ -2021,7 +2209,7 @@ if input.run.compareLinearAndWNL
         comparisonResult.status = 'skipped';
         comparisonResult.skipReason = ...
             ['input.run.modeRecoveryOnly is true, so the WNL ', ...
-             'coefficients mu and g were not evaluated.'];
+             'coefficients mu, g, and h were not evaluated.'];
         comparisonResult.requiredAction = ...
             ['After both recovery residuals pass, set ', ...
              'input.run.modeRecoveryOnly=false and rerun the script.'];
@@ -2054,6 +2242,10 @@ if input.run.compareLinearAndWNL
         if numel(input.modes) == 1
             muVector = wnlResult.mu;
             gMatrix = wnlResult.g;
+            phaseSensitiveGMatrix = complex(zeros(size(gMatrix)));
+            if isfield(wnlResult,'phaseSensitiveG')
+                phaseSensitiveGMatrix = wnlResult.phaseSensitiveG;
+            end
             validCubicScaling = wnlResult.validCubicScaling;
             exactLinearCoefficientVector = ...
                 wnlResult.linearCoefficient;
@@ -2068,6 +2260,10 @@ if input.run.compareLinearAndWNL
         else
             muVector = wnlResult.mu(:);
             gMatrix = wnlResult.g;
+            phaseSensitiveGMatrix = complex(zeros(size(gMatrix)));
+            if isfield(wnlResult,'phaseSensitiveG')
+                phaseSensitiveGMatrix = wnlResult.phaseSensitiveG;
+            end
             validCubicScaling = all(wnlResult.validCubicScaling(:));
             exactLinearCoefficientVector = ...
                 wnlResult.linearCoefficients(:);
@@ -2099,7 +2295,9 @@ if input.run.compareLinearAndWNL
         end
         coefficientsFinite = linearCoefficientsFinite && ...
             all(isfinite(real(gMatrix(:)))) && ...
-            all(isfinite(imag(gMatrix(:))));
+            all(isfinite(imag(gMatrix(:)))) && ...
+            all(isfinite(real(phaseSensitiveGMatrix(:)))) && ...
+            all(isfinite(imag(phaseSensitiveGMatrix(:))));
         exploratoryForcedTrajectory = ...
             input.weaklyNonlinear. ...
             allowExploratoryTrajectoryWithUnconvergedForcedFields && ...
@@ -2191,24 +2389,15 @@ if input.run.compareLinearAndWNL
                     input.options.forcedExploratoryResidualTolerance, ...
                     input.options.forcedSolveResidualTolerance);
             end
-            amplitudeScale = ...
-                input.comparison.zetaOverHPerUnitAmplitude;
-            scaleSource = 'input.comparison';
-            if isfield(operatorMetadata, ...
-                    'zetaOverHPerUnitAmplitude')
-                amplitudeScale = ...
-                    operatorMetadata.zetaOverHPerUnitAmplitude;
-                scaleSource = 'operatorMetadata';
+            if numel(input.modes) == 1
+                coefficientModes = {wnlResult.mode};
             else
-                warning('vi_wnl_user_run:AssumedAmplitudeNormalization', ...
-                    ['Using input.comparison.', ...
-                     'zetaOverHPerUnitAmplitude=%.6g. ', ...
-                     'The growth-rate comparison is normalization ', ...
-                     'independent, but the nonlinear saturation ', ...
-                     'amplitude is not.'], amplitudeScale);
+                coefficientModes = wnlResult.modes;
             end
+            amplitudeScale = wnl_mode_amplitude_scale(coefficientModes);
+            scaleSource = 'retained-mode conjugacy';
             validateattributes(amplitudeScale, {'numeric'}, ...
-                {'scalar', 'real', 'positive', 'finite'});
+                {'vector', 'real', 'positive', 'finite'});
 
             accelerationOffset = linearResult.aAnalysis - ...
                 linearResult.aCritical;
@@ -2217,7 +2406,23 @@ if input.run.compareLinearAndWNL
             else
                 sigmaVector = accelerationOffset*muVector(:);
             end
-            gMatrixInZetaUnits = gMatrix/abs(amplitudeScale)^2;
+            if isfield(wnlResult,'gPhysicalPeak')
+                gMatrixInZetaUnits = wnlResult.gPhysicalPeak;
+            else
+                gMatrixInZetaUnits = ...
+                    wnl_physical_cubic_coefficients( ...
+                    gMatrix,coefficientModes);
+            end
+            phaseSensitiveGMatrixInZetaUnits = ...
+                complex(zeros(size(gMatrixInZetaUnits)));
+            if isfield(wnlResult,'phaseSensitiveGPhysicalPeak')
+                phaseSensitiveGMatrixInZetaUnits = ...
+                    wnlResult.phaseSensitiveGPhysicalPeak;
+            elseif any(phaseSensitiveGMatrix(:) ~= 0)
+                phaseSensitiveGMatrixInZetaUnits = ...
+                    wnl_physical_cubic_coefficients( ...
+                    phaseSensitiveGMatrix,coefficientModes);
+            end
             sigmaWnl = sigmaVector(1);
             gInZetaUnits = gMatrixInZetaUnits(1, 1);
             [comparisonIndices, comparisonEndForcingPeriod] = ...
@@ -2257,7 +2462,8 @@ if input.run.compareLinearAndWNL
                 transientIntegration = ...
                     vi_cubic_transient_correction( ...
                     timeComparison,initialModeAmplitudes,sigmaVector, ...
-                    gMatrixInZetaUnits,transientLimits);
+                    gMatrixInZetaUnits,transientLimits, ...
+                    phaseSensitiveGMatrixInZetaUnits);
                 modeAmplitudesWnl = ...
                     transientIntegration.correctedAmplitudes;
                 modeAmplitudesLinear = ...
@@ -2273,7 +2479,8 @@ if input.run.compareLinearAndWNL
                 transientIntegration = vi_integrate_landau_limited( ...
                     timeComparison, initialModeAmplitudes, sigmaVector, ...
                     gMatrixInZetaUnits, ...
-                    input.comparison.maximumWnlAmplitudeOverH);
+                    input.comparison.maximumWnlAmplitudeOverH, ...
+                    phaseSensitiveGMatrixInZetaUnits);
                 modeAmplitudesWnl = transientIntegration.amplitudes;
                 modeAmplitudesLinear = exp( ...
                     transientIntegration.time*sigmaVector.') .* ...
@@ -2283,11 +2490,16 @@ if input.run.compareLinearAndWNL
                 relativeCubicCorrection = abs( ...
                     cubicAmplitudeCorrection)./max( ...
                     abs(modeAmplitudesLinear),1.0e-14);
-                nonlinearToLinearRateRatio = abs( ...
+                nonlinearRhs = modeAmplitudesLinear.*( ...
                     abs(modeAmplitudesLinear).^2* ...
-                    gMatrixInZetaUnits.')./max( ...
-                    abs(sigmaVector.'), ...
-                    1.0e-12*max(1,p.omegaStar));
+                    gMatrixInZetaUnits.') + ...
+                    conj(modeAmplitudesLinear).*( ...
+                    (modeAmplitudesLinear.^2)* ...
+                    phaseSensitiveGMatrixInZetaUnits.');
+                linearRhs = modeAmplitudesLinear.*sigmaVector.';
+                nonlinearToLinearRateRatio = abs(nonlinearRhs)./max( ...
+                    abs(linearRhs),1.0e-12*max(1,p.omegaStar)* ...
+                    max(abs(modeAmplitudesLinear),1.0e-14));
             end
             timeWnl = transientIntegration.time;
             validTimeCount = numel(timeWnl);
@@ -2384,7 +2596,7 @@ if input.run.compareLinearAndWNL
             interfaceComparisonSettings = input.comparison;
             interfaceComparisonSettings.nonlinearModelLabel = ...
                 nonlinearModelLabel;
-            if useOperatingPointWnl && numel(input.modes) == 2
+            if useOperatingPointWnl
                 interfaceDynamics = vi_compare_interface_dynamics_modes( ...
                     linearComparisonResult, modeAmplitudesWnl, ...
                     wnlResult, operatorMetadata, p, ...
@@ -2533,12 +2745,13 @@ if input.run.compareLinearAndWNL
             if useOperatingPointWnl
                 comparisonResult.wnlAmplitudeDependence = ...
                     ['Operating-point reduction: lambda_j, modal ', ...
-                     'carriers, g(j,k), and all combination solves are ', ...
+                     'carriers, g(j,k), h(j,k), and all combination ', ...
+                     'solves are ', ...
                      'evaluated at aAnalysis.'];
             else
                 comparisonResult.wnlAmplitudeDependence = ...
                     ['Local neutral-point approximation: ', ...
-                     'sigma=(aAnalysis-aCritical)*mu; mu and g are ', ...
+                     'sigma=(aAnalysis-aCritical)*mu; mu, g, and h are ', ...
                      'evaluated at aCritical.'];
             end
             comparisonResult.referenceChoice = referenceChoice;
@@ -2556,6 +2769,10 @@ if input.run.compareLinearAndWNL
             comparisonResult.sigmaVector = sigmaVector;
             comparisonResult.gMatrixInZetaUnits = ...
                 gMatrixInZetaUnits;
+            comparisonResult.phaseSensitiveGMatrix = ...
+                phaseSensitiveGMatrix;
+            comparisonResult.phaseSensitiveGMatrixInZetaUnits = ...
+                phaseSensitiveGMatrixInZetaUnits;
             comparisonResult.initialConditions = initialConditions;
             comparisonResult.amplitudeScale = amplitudeScale;
             comparisonResult.amplitudeScaleSource = scaleSource;
@@ -2785,6 +3002,11 @@ if input.run.compareLinearAndWNL
             if numel(input.modes) == 2
                 fprintf('  coupled g matrix in zeta/h units:\n');
                 disp(gMatrixInZetaUnits);
+                if any(phaseSensitiveGMatrixInZetaUnits(:) ~= 0)
+                    fprintf(['  phase-sensitive h matrix in zeta/h ', ...
+                        'units (conj(A_j)*A_k^2):\n']);
+                    disp(phaseSensitiveGMatrixInZetaUnits);
+                end
             end
             if useSmallAmplitudeTransient
                 fprintf(['  saturation was not estimated: this run uses ', ...
@@ -2983,7 +3205,7 @@ end
 
 %% Save a reproducible record of the inputs and outputs
 output = struct();
-output.codeRelease = 'V54-small-amplitude-cubic-transient';
+output.codeRelease = 'V70-projected-real-forced-field-gate';
 output.userInput = userInput;
 output.input = input;
 output.initialConditions = initialConditions;

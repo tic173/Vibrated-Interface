@@ -12,6 +12,12 @@ if nargin < 5
     userOpts = struct();
 end
 opts = wnl_options(userOpts);
+if strcmp(wnl_mode_coordinate_type( ...
+        mode,opts.realModeEigenvalueTolerance),'real')
+    result = wnl_real_self_coefficient( ...
+        model,mode,neutralModes,opts);
+    return;
+end
 
 specAA = wnl_combine_spec(model, {mode.spec, mode.spec}, ...
     [1, 1], [mode.spec.label, '_AA']);
@@ -67,15 +73,19 @@ termSecond = 2.0 * wnl_apply_quadratic(model, ...
 termDirect = 3.0 * wnl_apply_cubic(model, ...
     mode.field, mode.field, modeBar.field, mode.spec);
 cubicForcing = termMean + termSecond + termDirect;
-g = (mode.left' * cubicForcing(:)) / mode.normalization;
+rawG = (mode.left' * cubicForcing(:)) / mode.normalization;
+[g,reality] = wnl_project_modal_coefficient(rawG,mode,opts);
 
 result = base_result();
-result.validCubicScaling = ~quadraticResonance && forcedSolvesValid;
+result.validCubicScaling = ~quadraticResonance && forcedSolvesValid && ...
+    reality.accepted;
 result.quadraticResonance = quadraticResonance;
 result.forcedSolvesValid = forcedSolvesValid;
 result.forcedSolvesExploratoryUsable = ...
     forcedSolvesExploratoryUsable;
 result.g = g;
+result.gUnprojected = rawG;
+result.coefficientReality = reality;
 result.qAA = qAA;
 result.qAbarA = qAbarA;
 result.termMean = termMean;
@@ -83,12 +93,19 @@ result.termSecondHarmonic = termSecond;
 result.termDirectCubic = termDirect;
 result.cubicForcing = cubicForcing;
 result.message = '';
+if ~reality.accepted
+    result.message = sprintf([ ...
+        'A real modal coefficient had imaginary part %.3e, above the ', ...
+        'allowed %.3e. The coefficient was withheld.'], ...
+        abs(imag(rawG)),reality.allowedImaginaryPart);
+end
 end
 
 function result = base_result()
 result = struct();
 result.validCubicScaling = true;
 result.g = NaN;
+result.gUnprojected = NaN;
 result.qAA = [];
 result.qAbarA = [];
 result.termMean = [];
@@ -99,6 +116,8 @@ result.message = '';
 result.quadraticResonance = false;
 result.forcedSolvesValid = true;
 result.forcedSolvesExploratoryUsable = true;
+result.coordinateConvention = 'complex-conjugate-pair';
+result.coefficientReality = struct();
 end
 
 function tf = forced_field_usable(solution)

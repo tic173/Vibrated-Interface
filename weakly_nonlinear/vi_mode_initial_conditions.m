@@ -1,9 +1,10 @@
 function initial = vi_mode_initial_conditions(modes, settings)
 %VI_MODE_INITIAL_CONDITIONS Validate one- or two-mode Landau initial data.
 %
-% settings.amplitudesOverH contains nonnegative modal magnitudes and
-% settings.phases contains their phases in radians. Both arrays must have
-% one entry per retained Floquet mode.
+% settings.amplitudesOverH contains nonnegative modal peak displacements and
+% settings.phases contains their phases in radians. A self-conjugate
+% axisymmetric H/SH mode has one real signed coordinate, so its phase must be
+% 0 or pi modulo 2*pi. Distinct conjugate pairs retain a complex phase.
 
 numberOfModes = numel(modes);
 if numberOfModes < 1 || numberOfModes > 2
@@ -37,8 +38,26 @@ if magnitudes(1) <= 0
 end
 
 complexAmplitudes = magnitudes.*exp(1i*phases);
+coordinateTypes = cell(numberOfModes,1);
 labels = cell(numberOfModes, 1);
 for modeIndex = 1:numberOfModes
+    coordinateTypes{modeIndex} = ...
+        wnl_mode_coordinate_type(modes(modeIndex));
+    if strcmp(coordinateTypes{modeIndex},'real')
+        phaseError = abs(sin(phases(modeIndex)));
+        if phaseError > 1.0e-10
+            error('vi_mode_initial_conditions:RealModePhase', ...
+                ['Mode %d is self-conjugate and has a real signed ', ...
+                 'amplitude. Its phase must be 0 or pi modulo 2*pi, ', ...
+                 'not %.12g rad.'],modeIndex,phases(modeIndex));
+        end
+        signValue = sign(cos(phases(modeIndex)));
+        if signValue == 0
+            signValue = 1;
+        end
+        complexAmplitudes(modeIndex) = ...
+            signValue*magnitudes(modeIndex);
+    end
     if isfield(modes(modeIndex), 'label') && ...
             ~isempty(modes(modeIndex).label)
         labels{modeIndex} = char(modes(modeIndex).label);
@@ -52,6 +71,8 @@ initial.numberOfModes = numberOfModes;
 initial.amplitudesOverH = magnitudes;
 initial.phases = phases;
 initial.complexAmplitudesOverH = complexAmplitudes;
+initial.signedAmplitudesOverH = real(complexAmplitudes);
+initial.coordinateTypes = coordinateTypes;
 initial.labels = labels;
 initial.zeroSeededModes = find(magnitudes == 0);
 end

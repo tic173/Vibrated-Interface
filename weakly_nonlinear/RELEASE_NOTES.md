@@ -1,4 +1,50 @@
-# Current clean release (V42)
+# V70 projected real forced-field gate
+
+- A self-conjugate forced field is no longer rejected solely because its
+  raw primitive-variable vector contains an anti-real pressure-nullspace or
+  gauge component. When the raw conjugacy defect misses its gate, the code
+  projects the field onto the physical real subspace and checks that field
+  in the original unequilibrated Floquet equation.
+- The projected field is accepted only when its physical forcing-relative
+  residual passes the unchanged forced-field tolerance. The raw defect,
+  projected residual, and acceptance route remain in the diagnostics.
+- The release label is `V70-projected-real-forced-field-gate`.
+
+# V69 fixed pressure-range completion
+
+- The cylinder temporal-Schur forced solver now gives a certified pressure
+  nullspace precedence over structural rank. Small numerical pressure pivots
+  can no longer route a gauge-singular block through an unconstrained LU.
+- Singular temporal blocks use a fixed right-nullspace gauge constraint and
+  a fixed left-nullspace range-completion border. Acceptance is still checked
+  against the original physical equations, so the border cannot hide an
+  incompatible forcing.
+- Pressure-nullspace bases are certified once and reused for every temporal
+  harmonic. Diagnostics now report left/right null residuals, block nullity,
+  and the actual factor method.
+- The release label is `V69-fixed-pressure-range-completion`.
+
+# V68 pressure-quotient forced fields
+
+- Axisymmetric equal-order blocks can retain certified pressure-only right
+  null vectors. Their matching left compatibility directions can contain the
+  entire least-squares residual even when the velocity/interface field solves
+  the physical quotient equations to high accuracy. The cylinder Schur solver
+  now reports both residuals and accepts the quotient residual only after
+  certifying the algebraic nullspace and bounding the removed component.
+- The editable production driver uses a `1e-6` quotient residual gate and a
+  separate `1e-5` compatibility ceiling. Nonaxisymmetric fields and
+  uncertified nullspaces keep the original complete-equation gate.
+- A real axisymmetric source coupled into a complex nonaxisymmetric target no
+  longer projects the mixed sum field onto a self-conjugate block. The real
+  source keeps real-mode combinatorial factors while the target remains
+  complex.
+- Compact caches preserve both accepted and original forced residuals. They
+  also deduplicate the slaved fields and nonlinear forcing vectors referenced
+  by phase-sensitive coefficients while retaining their scalar diagnostics.
+  The release label is `V68-pressure-quotient-forced-fields`.
+
+# Previous clean release (V42)
 
 The distributed package now contains one supported cylinder input driver:
 
