@@ -8,7 +8,10 @@ It accepts SI fluid properties, two layer depths, 2D/3D Cartesian or 3D
 cylindrical geometry, vibration amplitude/frequency/acceleration phase, and
 one or more initial modal disturbances. It returns growth rates, multipliers,
 periodic Floquet coefficients, and time-dependent interface displacement,
-with plots and optional CSV/MAT output.
+with plots and optional CSV/MAT output. The driver defaults to 2D Cartesian
+geometry, scans `k_eff*h` from 0.2 to 20 (81 samples), and reconstructs dynamics
+only for the sample with the largest growth rate. All sampled rates are saved
+in `growth_rates.csv`.
 
 ```matlab
 run('linear_floquet/examples/run_linear_floquet.m')
@@ -39,6 +42,10 @@ second-order fields, self/cross Landau coefficients, and the full-state
 `cylinder_wnl_operators.m` ALE discretization. Start with
 `weakly_nonlinear/README.md` and run
 `weakly_nonlinear/tests/run_wnl_tests.m`.
+
+WNL MAT caches and reports are organized under
+[`weakly_nonlinear/data`](weakly_nonlinear/data). Loaders support historical saved
+paths, and default WNL runs save new MAT records there.
 
 The existing reduced interface solver supplies an independent threshold and
 mode-validation target. Converge the full-state linear recovery before using

@@ -558,10 +558,11 @@ Result saving also does not depend on `pwd`. A relative setting such as
 input.run.outputFile = 'vi_wnl_user_result.mat';
 ```
 
-is resolved from the repository root. Relative subdirectories are created
+is saved in `weakly_nonlinear/data`. Explicit relative subdirectories are resolved
+from the repository root and created
 automatically. The absolute destination is printed and stored in
 `output.save.savedFile`; if the requested location cannot be written, the
-driver attempts a repository `weakly_nonlinear/results` directory and then
+driver attempts a repository `weakly_nonlinear/data` directory and then
 MATLAB's temporary directory.
 
 With `input.run.outputFile='auto'`, the compact filename identifies the
@@ -1090,3 +1091,24 @@ strict gate.
 5. Converge `g` independently in temporal, radial, azimuthal, and vertical
    resolution.
 6. Compare the reconstructed branch with early nonlinear DNS data.
+
+## Saved data location
+
+The repository's 53 former root-level MAT caches and reports are stored in
+[`data/`](data/). They were moved without changing their contents. Example scripts
+read and save there, and bare filenames passed to `vi_save_output_record` now
+use this directory. Legacy absolute output paths pointing directly into the
+repository root are also redirected here.
+
+`vi_wnl_resolve_data_file` resolves bare names and missing historical paths by
+basename in `data/`; recovery and postprocessing entry points use it. This keeps
+paths embedded in existing MAT records usable without rewriting the records.
+Existing explicit paths remain valid. For manual loading, use:
+
+```matlab
+addpath('weakly_nonlinear')
+saved = load(vi_wnl_resolve_data_file('your_cache.mat'));
+```
+
+Linear Floquet run bundles remain in `linear_floquet/results/run_*` alongside
+their CSV files; they are separate from the WNL caches.

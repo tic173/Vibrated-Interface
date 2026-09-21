@@ -11,7 +11,8 @@ end
 validateattributes(files,{'cell'},{'vector','nonempty'});
 records = cell(numel(files),1);
 for fileIndex = 1:numel(files)
-    filename = char(files{fileIndex});
+    filename = vi_wnl_resolve_data_file(files{fileIndex});
+    files{fileIndex} = filename;
     if ~isfile(filename)
         error('vi_compare_shared_mode_invariance:MissingFile', ...
             'Missing coefficient cache: %s',filename);

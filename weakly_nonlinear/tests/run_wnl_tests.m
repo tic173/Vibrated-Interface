@@ -1101,6 +1101,17 @@ assert(strcmp(savedRecord.save.savedFile,savedFile));
 loaded = load(savedFile,'output');
 assert(loaded.output.answer == 42);
 assert(strcmp(loaded.output.save.savedFile,savedFile));
+[~,dataFile]=vi_save_output_record(record,'relocated_record',temporaryRoot);
+expected=fullfile(temporaryRoot,'weakly_nonlinear','data','relocated_record.mat');
+assert(strcmp(dataFile,expected) && isfile(dataFile));
+assert(strcmp(vi_wnl_resolve_data_file('relocated_record',temporaryRoot),expected));
+oldPath=fullfile(temporaryRoot,'relocated_record.mat');
+assert(strcmp(vi_wnl_resolve_data_file(oldPath,temporaryRoot),expected));
+assert(strcmp(vi_wnl_resolve_data_file(fullfile('weakly_nonlinear','data', ...
+    'relocated_record.mat'),temporaryRoot),expected));
+assert(strcmp(vi_wnl_resolve_data_file(savedFile,temporaryRoot),savedFile));
+[~,redirected]=vi_save_output_record(record,oldPath,temporaryRoot);
+assert(strcmp(redirected,expected) && ~isfile(oldPath));
 end
 
 function test_compact_output_record()

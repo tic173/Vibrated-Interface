@@ -23,14 +23,14 @@ end
 gridType = validatestring(gridType,{'besselEnriched','chebyshev'});
 
 root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
-baseSourceFile = fullfile(root, ...
+baseSourceFile = fullfile(root,'weakly_nonlinear','data', ...
     'vi_wnl_ag0-4_fHz-60_modes-m2l9-m2l2.mat');
 if strcmp(gridType,'chebyshev')
     gridTag = '_chebyshev';
 else
     gridTag = '';
 end
-outputFile = fullfile(root,sprintf( ...
+outputFile = fullfile(root,'weakly_nonlinear','data',sprintf( ...
     'vi_wnl_complete_ag0-4_fHz-60_modes-m2l9-m2l2%s_Nr%d.mat', ...
     gridTag,nr));
 if ~isfile(baseSourceFile)
@@ -45,10 +45,10 @@ end
 
 if strcmp(stage,'recovery')
     seedFile = nearest_lower_grid_cache(root,gridTag,nr,baseSourceFile);
-    source = load(seedFile,'output');
+    source = load(vi_wnl_resolve_data_file(seedFile),'output');
     saved = source;
 else
-    saved = load(outputFile,'output');
+    saved = load(vi_wnl_resolve_data_file(outputFile),'output');
     source = saved;
 end
 input = saved.output.input;
@@ -130,7 +130,7 @@ function filename = nearest_lower_grid_cache(root,gridTag,nr,fallback)
 pattern = sprintf( ...
     'vi_wnl_complete_ag0-4_fHz-60_modes-m2l9-m2l2%s_Nr*.mat', ...
     gridTag);
-candidates = dir(fullfile(root,pattern));
+candidates = dir(fullfile(root,'weakly_nonlinear','data',pattern));
 bestNr = -Inf;
 filename = fallback;
 for candidateIndex = 1:numel(candidates)

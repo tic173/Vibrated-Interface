@@ -9,8 +9,18 @@ xlabel('t (s)'); ylabel('Real modal displacement (m)'); grid on;
 labels=arrayfun(@(md) char(md.input.label),result.modes,'UniformOutput',false);
 legend(labels,'Interpreter','none','Location','best');
 nexttile;
-bar([result.modes.growthRatePerSecond]); yline(0,'k:');
-xlabel('Requested spatial mode'); ylabel('Growth rate (s^{-1})');
+if isfield(result,'sweep')
+    T=result.sweep.table; [~,order]=sort(T.kh);
+    plot(T.kh(order),T.growth_per_s(order),'o-','MarkerSize',3,'LineWidth',1.1); hold on;
+    ix=result.sweep.selectedIndex;
+    plot(T.kh(ix),T.growth_per_s(ix),'rp','MarkerSize',11,'MarkerFaceColor','r');
+    yline(0,'k:'); xlabel('Effective wavenumber k_{eff}h');
+    ylabel('Growth rate (s^{-1})'); grid on;
+    title(sprintf('Selected k_{eff}h = %.4g',T.kh(ix)));
+else
+    bar([result.modes.growthRatePerSecond]); yline(0,'k:');
+    xlabel('Requested spatial mode'); ylabel('Growth rate (s^{-1})');
+end
 if isempty(result.interface_m), return; end
 handles(2)=figure('Color','w','Name','Linear interface dynamics','Position',[100 100 900 650]);
 if strcmp(cfg.geometry.type,'cartesian2d')

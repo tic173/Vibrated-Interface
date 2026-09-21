@@ -28,7 +28,7 @@ function report = vi_verify_g21_numerics(cacheFile,settings)
 moduleRoot = fileparts(mfilename('fullpath'));
 repositoryRoot = fileparts(moduleRoot);
 if nargin < 1 || isempty(cacheFile)
-    cacheFile = fullfile(repositoryRoot, ...
+    cacheFile = fullfile(repositoryRoot,'weakly_nonlinear','data', ...
         'vi_wnl_quantitative_ag0-3_fHz-30_modes-m0l6-m0l2.mat');
 end
 if nargin < 2 || isempty(settings)
@@ -597,13 +597,7 @@ end
 end
 
 function filename = resolve_cache_file(filename,repositoryRoot)
-filename = char(filename);
-if ~isfile(filename)
-    candidate = fullfile(repositoryRoot,filename);
-    if isfile(candidate)
-        filename = candidate;
-    end
-end
+filename = vi_wnl_resolve_data_file(filename,repositoryRoot);
 if ~isfile(filename)
     error('vi_verify_g21_numerics:MissingCache', ...
         'Could not find coefficient cache: %s',filename);

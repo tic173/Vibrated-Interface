@@ -15,7 +15,7 @@ validateattributes(nr,{'numeric'},{'scalar','integer','>=',28});
 
 root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
 sourceFile = nearest_two_mode_cache(root,nr);
-outputFile = fullfile(root,sprintf( ...
+outputFile = fullfile(root,'weakly_nonlinear','data',sprintf( ...
     'vi_wnl_selfaudit_ag0-4_fHz-60_mode-m2l9_chebyshev_Nr%d.mat',nr));
 if strcmp(stage,'coefficient')
     sourceFile = outputFile;
@@ -25,7 +25,7 @@ if ~isfile(sourceFile)
         'Required recovery cache is missing: %s',sourceFile);
 end
 
-saved = load(sourceFile,'output');
+saved = load(vi_wnl_resolve_data_file(sourceFile),'output');
 input = saved.output.input;
 input.modes = input.modes(1);
 input.numberOfModes = 1;
@@ -85,7 +85,7 @@ output = vi_wnl_run_with_input(input);
 end
 
 function filename = nearest_two_mode_cache(root,nr)
-candidates = dir(fullfile(root, ...
+candidates = dir(fullfile(root,'weakly_nonlinear','data', ...
     ['vi_wnl_complete_ag0-4_fHz-60_modes-m2l9-m2l2_', ...
      'chebyshev_Nr*.mat']));
 bestNr = -Inf;

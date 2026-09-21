@@ -17,9 +17,32 @@ run('linear_floquet/examples/run_linear_floquet.m')
 ```
 
 Edit the **User inputs** section of that script. Select the geometry in the
-`vi_linear_defaults(...)` call before editing its mode fields. The driver
-calculates dimensionless parameters, checks temporal resolution, prints growth
-rates, plots the motion, and saves a new output folder for each run.
+`vi_linear_defaults(...)` call before editing its mode fields. The driver defaults to **cartesian2d** and scans 81 effective wavenumbers
+`kStarRange=linspace(0.2,20,81)`, where `kh=k_eff*lowerDepth`. It computes
+Floquet growth rates for every sample, then reconstructs interface dynamics
+**only for the sample with the largest growth rate**. If all rates are negative,
+this is the least damped mode. Refine the range and spacing near the maximum;
+the selected point is a sampled maximum, not a continuous optimization.
+
+The Cartesian scan uses unbounded Fourier modes; `Lx` and `Ly` set the plotted
+window. For a periodic box, select `horizontalBoundary='periodic'` and supply
+compatible discrete Fourier modes programmatically. Horizontal wall conditions
+are unchanged. For cylindrical geometry, the driver instead scans the requested
+`azimuthalOrders` and `radialIndices` at the fixed radius, respecting the discrete
+Bessel spectrum. In 3D Cartesian geometry, `directionRad` chooses wave direction.
+
+The driver checks temporal resolution, plots growth versus `kh` with the selected
+point marked, plots that mode's dynamics, and saves a new folder for each run.
+`growthRates` and `result.sweep.table` contain the entire scan; `result.sweep.modes`
+preserves its eigenvalues, harmonics and convergence diagnostics.
+`result.modes`, `result.config.modes`, and the interface arrays contain only the
+selected mode. `growth_rates.csv` contains all samples; `modal_dynamics.csv`
+contains only the selected mode. The MAT file preserves both.
+
+Use `vi_linear_growth(cfg)` for growth rates alone, `vi_linear_most_unstable(cfg)`
+for a scan followed by the selected dynamics, or `vi_linear_floquet(cfg)` for
+superposed dynamics of every supplied mode. `vi_linear_dynamics(growthResult)`
+reconstructs a previously computed solution without repeating root searches.
 
 For programmatic use:
 

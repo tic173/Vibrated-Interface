@@ -3,14 +3,14 @@ function output = vi_package_60hz_mixed_m0l9_m2l2()
 
 root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
 addpath(fullfile(root,'weakly_nonlinear'));
-auditFile = fullfile(root, ...
+auditFile = fullfile(root,'weakly_nonlinear','data', ...
     ['vi_wnl_complete_60Hz_ag0-4_m0l9-m2l2_', ...
      'chebyshev_zppb21_radial_audit.mat']);
 if ~isfile(auditFile)
     error('vi_package_60hz_mixed_m0l9_m2l2:MissingAudit', ...
         'The strict radial audit is missing: %s',auditFile);
 end
-savedAudit = load(auditFile,'report');
+savedAudit = load(vi_wnl_resolve_data_file(auditFile),'report');
 report = savedAudit.report;
 if ~isfield(report,'reliable') || ~report.reliable
     error('vi_package_60hz_mixed_m0l9_m2l2:UnreliableAudit', ...
@@ -18,7 +18,7 @@ if ~isfield(report,'reliable') || ~report.reliable
 end
 
 highFile = report.files.g21{end};
-savedHigh = load(highFile,'output');
+savedHigh = load(vi_wnl_resolve_data_file(highFile),'output');
 output = savedHigh.output;
 wnl = output.weaklyNonlinear;
 modes = wnl.modes(:);
@@ -51,7 +51,7 @@ wnl.coefficientAssembly = report.coefficientAssembly;
 output.weaklyNonlinear = wnl;
 output.codeRelease = 'V71-radially-certified-mixed-coefficient-assembly';
 
-outputFile = fullfile(root,vi_wnl_output_filename(output.input));
+outputFile = fullfile(root,'weakly_nonlinear','data',vi_wnl_output_filename(output.input));
 output.input.run.outputFile = outputFile;
 output.input.run.recoveredModeFile = outputFile;
 output.input.run.postprocessSavedCoefficientsOnly = true;

@@ -655,7 +655,8 @@ input.run.saveProfile = 'compact';
 % MAT file. The untouched USER INPUTS block is output.userInput and the
 % effective case is output.input.
 % Enter a filename here to override automatic naming.
-% Relative paths are resolved from the repository root, not from pwd.
+% Bare filenames are saved in weakly_nonlinear/data.
+% Explicit relative subdirectories are resolved from the repository root.
 input.run.outputFile = 'auto';
 
 %% ======================== END USER INPUTS =============================

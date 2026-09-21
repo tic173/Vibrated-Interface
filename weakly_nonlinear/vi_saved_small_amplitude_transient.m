@@ -793,38 +793,11 @@ end
 end
 
 function filename = resolve_cache_path(requestedFile)
-moduleRoot = fileparts(mfilename('fullpath'));
-repositoryRoot = fileparts(moduleRoot);
-requestedFile = char(requestedFile);
-[~,name,extension] = fileparts(requestedFile);
-if isempty(extension)
-    extension = '.mat';
-    requestedFile = [requestedFile,extension];
+filename = vi_wnl_resolve_data_file(requestedFile);
+if ~isfile(filename)
+    error('vi_saved_small_amplitude_transient:CacheNotFound', ...
+        'Could not find the automatically selected coefficient cache: %s',filename);
 end
-outputName = [name,extension];
-if is_absolute_path(requestedFile)
-    % A cache may retain an absolute path from before the project moved.
-    % Preserve that path first, then relocate the same file by basename.
-    candidates = {requestedFile, ...
-        fullfile(repositoryRoot,outputName), ...
-        fullfile(repositoryRoot,'weakly_nonlinear','results',outputName), ...
-        fullfile(tempdir,outputName)};
-else
-    candidates = {fullfile(repositoryRoot,requestedFile), ...
-        fullfile(repositoryRoot,'weakly_nonlinear','results',outputName), ...
-        fullfile(tempdir,outputName)};
-end
-candidates = unique(candidates,'stable');
-for candidateIndex = 1:numel(candidates)
-    if isfile(candidates{candidateIndex})
-        filename = candidates{candidateIndex};
-        return;
-    end
-end
-filename = candidates{1};
-error('vi_saved_small_amplitude_transient:CacheNotFound', ...
-    'Could not find the automatically selected coefficient cache: %s', ...
-    filename);
 end
 
 function assert_matching_case(input,savedInput)

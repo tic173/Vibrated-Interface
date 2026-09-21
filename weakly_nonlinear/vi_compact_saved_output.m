@@ -10,7 +10,7 @@ if nargin < 1 || isempty(sourceFile)
     error('vi_compact_saved_output:SourceRequired', ...
         'A source MAT-file is required.');
 end
-sourceFile = char(sourceFile);
+sourceFile = vi_wnl_resolve_data_file(sourceFile);
 if ~isfile(sourceFile)
     error('vi_compact_saved_output:SourceMissing', ...
         'The source MAT-file does not exist: %s',sourceFile);
@@ -29,6 +29,9 @@ if nargin < 2 || isempty(destinationFile)
         [sourceName,'_compact',sourceExtension]);
 else
     destinationFile = char(destinationFile);
+    if ~java.io.File(destinationFile).isAbsolute()
+        destinationFile = fullfile(sourceDirectory,destinationFile);
+    end
 end
 if strcmp(canonical_path(sourceFile),canonical_path(destinationFile))
     error('vi_compact_saved_output:RefuseOverwrite', ...
@@ -54,7 +57,7 @@ if ~isfield(output.input,'run') || ~isstruct(output.input.run)
 end
 output.input.run.saveProfile = profile;
 
-repositoryRoot = sourceDirectory;
+repositoryRoot = fileparts(fileparts(mfilename('fullpath')));
 [~,savedFile,saveInformation] = vi_save_output_record( ...
     output,destinationFile,repositoryRoot);
 sourceDetails = dir(sourceFile);

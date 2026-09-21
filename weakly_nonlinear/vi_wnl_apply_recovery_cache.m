@@ -415,31 +415,5 @@ end
 end
 
 function resolved = resolve_cache_file(fileName,repositoryRoot)
-fileName = char(fileName);
-isAbsolute = startsWith(fileName,filesep) || ...
-    ~isempty(regexp(fileName,'^[A-Za-z]:[\\/]','once'));
-[~,name,extension] = fileparts(fileName);
-if isempty(extension)
-    extension = '.mat';
-    fileName = [fileName,extension];
-end
-outputName = [name,extension];
-if isAbsolute
-    % Relocate stale absolute paths when the repository has been moved.
-    candidates = {fileName,fullfile(repositoryRoot,outputName), ...
-        fullfile(repositoryRoot,'weakly_nonlinear','results',outputName), ...
-        fullfile(tempdir,outputName)};
-else
-    candidates = {fullfile(repositoryRoot,fileName), ...
-        fullfile(repositoryRoot,'weakly_nonlinear','results',outputName), ...
-        fullfile(tempdir,outputName)};
-end
-candidates = unique(candidates,'stable');
-for candidateIndex = 1:numel(candidates)
-    if isfile(candidates{candidateIndex})
-        resolved = candidates{candidateIndex};
-        return;
-    end
-end
-resolved = candidates{1};
+resolved = vi_wnl_resolve_data_file(fileName,repositoryRoot);
 end

@@ -18,11 +18,11 @@ end
 validateattributes(nr,{'numeric'},{'scalar','integer','>=',11});
 
 root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
-templateFile = fullfile(root, ...
+templateFile = fullfile(root,'weakly_nonlinear','data', ...
     'vi_wnl_ag0-3_fHz-30_modes-m0l6-m2l2.mat');
-outputFile = fullfile(root,sprintf( ...
+outputFile = fullfile(root,'weakly_nonlinear','data',sprintf( ...
     'vi_wnl_mixedshared_ag0-3_fHz-30_modes-m0l6-m2l2_Nr%d.mat',nr));
-canonicalM2File = fullfile(root, ...
+canonicalM2File = fullfile(root,'weakly_nonlinear','data', ...
     'vi_wnl_canonicalself_ag0-3_fHz-30_modes-m2l6-m2l2_Nr16.mat');
 if strcmp(stage,'recovery')
     sourceFile = templateFile;
@@ -38,8 +38,8 @@ if ~isfile(canonicalM2File)
         'Canonical m=2 radial basis is missing: %s',canonicalM2File);
 end
 
-saved = load(sourceFile,'output');
-canonicalM2 = load(canonicalM2File,'output');
+saved = load(vi_wnl_resolve_data_file(sourceFile),'output');
+canonicalM2 = load(vi_wnl_resolve_data_file(canonicalM2File),'output');
 preferredBasisLabels = canonicalM2.output.operatorMetadata.radialGrid. ...
     selectedBasisLabels;
 input = saved.output.input;

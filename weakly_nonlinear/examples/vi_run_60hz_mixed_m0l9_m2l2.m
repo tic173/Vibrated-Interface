@@ -81,7 +81,7 @@ if strcmp(stage,'recovery')
     [input,seedModes,seedMetadata,targetVerticalGrid] = ...
         recovery_input(root,nr,gridType,verticalPoints);
 else
-    saved = load(recoveryFile,'output');
+    saved = load(vi_wnl_resolve_data_file(recoveryFile),'output');
     input = saved.output.input;
 end
 input = strict_input(input,outputFile,recoveryFile,nr,stage, ...
@@ -148,7 +148,7 @@ else
         root,nr,gridType,verticalPoints);
 end
 if ~isempty(previousFile)
-    previous = load(previousFile,'output');
+    previous = load(vi_wnl_resolve_data_file(previousFile),'output');
     input = previous.output.input;
     modes = previous.output.weaklyNonlinear.modes;
     metadata = repmat({struct( ...
@@ -156,7 +156,7 @@ if ~isempty(previousFile)
         'parametersR0',previous.output.parameters.R0)},2,1);
     m2File = nearest_m2_cache(root,nr,gridType);
     if ~strcmp(previousFile,currentFile) && ~isempty(m2File)
-        m2Saved = load(m2File,'output');
+        m2Saved = load(vi_wnl_resolve_data_file(m2File),'output');
         m2Mode = m2Saved.output.weaklyNonlinear.modes{2};
         if m2Saved.output.operatorMetadata.layout.nr == nr
             modes{2} = m2Mode;
@@ -169,7 +169,7 @@ if ~isempty(previousFile)
     return;
 end
 
-axisFile = fullfile(root, ...
+axisFile = fullfile(root,'weakly_nonlinear','data', ...
     'vi_wnl_complete_ag0-4_fHz-60_modes-m0l9-m0l2_Nr16.mat');
 m2File = nearest_m2_cache(root,nr,gridType);
 if ~isfile(axisFile) || isempty(m2File)
@@ -177,8 +177,8 @@ if ~isfile(axisFile) || isempty(m2File)
         ['Validated m0l9 and m2l2 source caches are required. ', ...
          'Missing axis=%d, m2=%d.'],isfile(axisFile),~isempty(m2File));
 end
-m2Saved = load(m2File,'output');
-axisSaved = load(axisFile,'output');
+m2Saved = load(vi_wnl_resolve_data_file(m2File),'output');
+axisSaved = load(vi_wnl_resolve_data_file(axisFile),'output');
 assert_matching_operating_point(axisSaved.output,m2Saved.output);
 
 % The fine axisymmetric source fixes the common vertical discretization.
@@ -365,9 +365,9 @@ for index = 1:numel(files)
             'Required radial-audit file is missing: %s',files{index});
     end
 end
-saved12 = cellfun(@(file) load(file,'output'),files12, ...
+saved12 = cellfun(@(file) load(vi_wnl_resolve_data_file(file),'output'),files12, ...
     'UniformOutput',false);
-saved21 = cellfun(@(file) load(file,'output'),files21, ...
+saved21 = cellfun(@(file) load(vi_wnl_resolve_data_file(file),'output'),files21, ...
     'UniformOutput',false);
 records12 = cellfun(@(item) coefficient_record(item.output), ...
     saved12,'UniformOutput',false);
@@ -458,7 +458,7 @@ report.coefficientAssembly = [ ...
 report.reliable = report.radialConverged && ...
     report.verticalConverged && report.strictDiscreteValidity;
 verticalTag = vertical_tag(verticalPoints);
-reportFile = fullfile(root, ...
+reportFile = fullfile(root,'weakly_nonlinear','data', ...
     sprintf(['vi_wnl_complete_60Hz_ag0-4_m0l9-m2l2_', ...
     '%s%s_radial_audit.mat'],lower(gridType),verticalTag));
 save(reportFile,'report','-v7');
@@ -506,8 +506,8 @@ for index = 1:numel(files)
             'Required vertical-audit file is missing: %s',files{index});
     end
 end
-balanced = load(balancedVerticalFile,'output');
-fine = load(fineVerticalFile,'output');
+balanced = load(vi_wnl_resolve_data_file(balancedVerticalFile),'output');
+fine = load(vi_wnl_resolve_data_file(fineVerticalFile),'output');
 [balancedTerms,termNames] = cross_term_projections( ...
     balanced.output,2,1);
 [fineTerms,~] = cross_term_projections(fine.output,2,1);
@@ -576,13 +576,13 @@ valid = record.strictCoefficientMask(rowIndex,columnIndex);
 end
 
 function reference = independent_self_reference(root)
-axisFile = fullfile(root, ...
+axisFile = fullfile(root,'weakly_nonlinear','data', ...
     'vi_wnl_complete_ag0-4_fHz-60_modes-m0l9-m0l2_Nr16.mat');
-m2File = fullfile(root, ...
+m2File = fullfile(root,'weakly_nonlinear','data', ...
     ['vi_wnl_complete_ag0-4_fHz-60_modes-m2l9-m2l2_', ...
      'chebyshev_Nr36.mat']);
-axisSaved = load(axisFile,'output');
-m2Saved = load(m2File,'output');
+axisSaved = load(vi_wnl_resolve_data_file(axisFile),'output');
+m2Saved = load(vi_wnl_resolve_data_file(m2File),'output');
 reference.files = {axisFile;m2File};
 reference.GPhysicalPeak = [ ...
     axisSaved.output.weaklyNonlinear.gPhysicalPeak(1,1); ...
@@ -698,7 +698,7 @@ end
 
 function filename = nearest_lower_mixed_cache( ...
         root,nr,gridType,verticalPoints)
-candidates = dir(fullfile(root, ...
+candidates = dir(fullfile(root,'weakly_nonlinear','data', ...
     mixed_pattern(gridType,verticalPoints)));
 filename = nearest_numbered_file(candidates,nr,true);
 end
@@ -709,7 +709,7 @@ if strcmp(gridType,'chebyshev')
 else
     gridTag = '';
 end
-candidates = dir(fullfile(root,sprintf( ...
+candidates = dir(fullfile(root,'weakly_nonlinear','data',sprintf( ...
     'vi_wnl_complete_ag0-4_fHz-60_modes-m2l9-m2l2%s_Nr*.mat', ...
     gridTag)));
 filename = nearest_numbered_file(candidates,nr,false);
@@ -743,7 +743,7 @@ else
     gridTag = '';
 end
 gridTag = [gridTag,vertical_tag(verticalPoints)];
-filename = fullfile(root,sprintf( ...
+filename = fullfile(root,'weakly_nonlinear','data',sprintf( ...
     'vi_wnl_complete_ag0-4_fHz-60_modes-m0l9-m2l2%s_Nr%d.mat', ...
     gridTag,nr));
 end
@@ -766,7 +766,7 @@ else
     gridTag = '';
 end
 gridTag = [gridTag,vertical_tag(verticalPoints)];
-filename = fullfile(root,sprintf( ...
+filename = fullfile(root,'weakly_nonlinear','data',sprintf( ...
     ['vi_wnl_complete_ag0-4_fHz-60_modes-m0l9-m2l2%s_', ...
      'Nr%d_%s.mat'],gridTag,nr,lower(stage)));
 end

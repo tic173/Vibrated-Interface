@@ -2,11 +2,12 @@ function [output, savedFile, information] = vi_save_output_record( ...
         output, requestedFile, repositoryRoot)
 %VI_SAVE_OUTPUT_RECORD Save a result without relying on MATLAB's pwd.
 %
-% Relative paths are resolved from REPOSITORYROOT. This matters when the
+% Bare filenames go to REPOSITORYROOT/weakly_nonlinear/data.
+% Explicit relative subdirectories are resolved from REPOSITORYROOT. This matters when the
 % driver was launched from a temporary folder that has subsequently been
 % renamed or removed: SAVE with a bare filename then fails even though the
 % script itself is still running. If the requested destination cannot be
-% created or written, the function tries a repository results directory and
+% created or written, the function tries a repository data directory and
 % finally MATLAB's temporary directory. The chosen absolute path is stored
 % in output.save before the MAT file is written.
 
@@ -37,6 +38,13 @@ end
 
 if is_absolute_path(requestedFile)
     primaryFile = requestedFile;
+    % Redirect legacy root-level output paths retained in old MAT records.
+    if strcmp(fileparts(requestedFile),repositoryRoot)
+        [~,name,extension]=fileparts(requestedFile);
+        primaryFile=fullfile(repositoryRoot,'weakly_nonlinear','data',[name extension]);
+    end
+elseif isempty(fileparts(requestedFile))
+    primaryFile = fullfile(repositoryRoot,'weakly_nonlinear','data',requestedFile);
 else
     primaryFile = fullfile(repositoryRoot, requestedFile);
 end
@@ -52,7 +60,7 @@ end
 outputName = [baseName, extension];
 
 candidateFiles = {primaryFile, ...
-    fullfile(repositoryRoot,'weakly_nonlinear','results',outputName), ...
+    fullfile(repositoryRoot,'weakly_nonlinear','data',outputName), ...
     fullfile(tempdir,outputName)};
 candidateFiles = unique_paths(candidateFiles);
 errors = repmat(struct('file','','identifier','','message',''),0,1);

@@ -97,13 +97,34 @@ assert(isequaln(loaded.result.interface_m,b.interface_m));
 assert(height(readtable(fullfile(b.outputDirectory,'growth_rates.csv')))==2);
 close all;
 
+% Sweep computes all growth rates but reconstructs only the sampled maximum.
+c=vi_linear_defaults('cartesian2d'); c.geometry.horizontalBoundary='unbounded';
+c.numerics.harmonics=6; c.numerics.checkConvergence=false;
+c.output.plot=true; c.output.save=true; c.output.directory=tempFolder;
+c.sampling.timeSeconds=(0:2)/c.forcing.frequencyHz;
+for j=1:3
+    c.modes(j)=c.modes(1); c.modes(j).kx=(2*j-1)/c.geometry.lowerDepth;
+    c.modes(j).label=sprintf('sample %d',j);
+end
+growth=vi_linear_growth(c);
+assert(~isfield(growth,'interface_m') && ~isfield(growth.modes,'temporalDisplacement_m'));
+b=vi_linear_most_unstable(c);
+[expected,index]=max([growth.modes.growthRatePerSecond]);
+assert(b.sweep.selectedIndex==index && numel(b.modes)==1);
+assert(abs(b.modes.growthRatePerSecond-expected)<1e-7);
+assert(size(b.modalDisplacement_m,1)==1 && numel(b.config.modes)==1);
+assert(height(readtable(fullfile(b.outputDirectory,'growth_rates.csv')))==3);
+assert(~isfield(b.sweep.modes,'temporalDisplacement_m'));
+assert(height(readtable(fullfile(b.outputDirectory,'modal_dynamics.csv')))==numel(c.sampling.timeSeconds));
+close all;
+
 % Fail clearly for unsupported/ambiguous physical inputs.
 c=cfg; c.fluids.rhoUpper=c.fluids.rhoLower; must_fail(c,'vi_linear:DensityContrast');
 c=cfg; c.geometry.horizontalBoundary='pinned'; must_fail(c,'vi_linear:Boundary');
 c=vi_linear_defaults('cartesian2d'); c.modes.kx=0; must_fail(c,'vi_linear:ZeroMode');
 c=vi_linear_defaults('cartesian2d'); c.modes.kx=1; must_fail(c,'vi_linear:Periodicity');
 c=cfg; c.forcing.amplitdue=1; must_fail(c,'vi_linear:UnknownInput');
-fprintf('PASS: geometry equivalence, phase, units, legacy compatibility, inviscid limit, RT, multimode I/O, and input validation.\n');
+fprintf('PASS: geometry equivalence, phase, units, legacy compatibility, inviscid limit, RT, multimode I/O, growth-only sweep selection, and input validation.\n');
 end
 
 function must_fail(c,identifier)

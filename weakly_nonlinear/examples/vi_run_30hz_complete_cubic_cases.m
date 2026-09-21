@@ -24,7 +24,7 @@ for caseIndex = 1:numel(cases)
             'Validated recovery cache is missing: %s', ...
             definition.sourceFile);
     end
-    saved = load(definition.sourceFile,'output');
+    saved = load(vi_wnl_resolve_data_file(definition.sourceFile),'output');
     input = complete_coefficient_input(saved.output.input,definition);
     outputs{caseIndex} = vi_wnl_run_with_input(input);
 end
@@ -45,8 +45,8 @@ definitions.m2l6_m2l2 = definition(root,'m2l6-m2l2', ...
 end
 
 function value = definition(root,modeToken,sourceName)
-value.sourceFile = fullfile(root,sourceName);
-value.outputFile = fullfile(root,sprintf( ...
+value.sourceFile = fullfile(root,'weakly_nonlinear','data',sourceName);
+value.outputFile = fullfile(root,'weakly_nonlinear','data',sprintf( ...
     'vi_wnl_complete_ag0-3_fHz-30_modes-%s_Nr16.mat',modeToken));
 end
 
