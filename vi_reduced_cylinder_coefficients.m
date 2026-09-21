@@ -1,10 +1,12 @@
 function An = vi_reduced_cylinder_coefficients(n, sStar, betaStar, ...
-    omegaStar, At, eta, C, Bd, modeType, gSign)
-%VI_REDUCED_CYLINDER_COEFFICIENTS Finite-depth free-line Schur diagonal.
+    omegaStar, At, eta, C, Bd, modeType, gSign, layerDepths)
+%VI_REDUCED_CYLINDER_COEFFICIENTS Finite-depth separable Schur diagonal.
+% Optional layerDepths = [lowerDepth upperDepth]/referenceDepth, default [1 1].
+% betaStar is k*h for Cartesian Fourier or cylindrical Bessel modes.
 %
 % This is the single implementation used by both the neutral-acceleration
 % and Floquet-growth solvers.  For every temporal harmonic it solves the
-% vertical Stokes problem with no slip at z=-1 and z=+1, velocity and
+% vertical Stokes problem with no slip at both layer walls, velocity and
 % tangential-stress continuity at z=0, and unit interface displacement.
 %
 % The original code switched to a semi-infinite lower layer when a large
@@ -12,6 +14,10 @@ function An = vi_reduced_cylinder_coefficients(n, sStar, betaStar, ...
 % bottom-wall conditions and made its mode incompatible with the full WNL
 % operator.  The basis used here contains only decaying exponentials such
 % as exp(-q*beta); it enforces both finite walls without overflow.
+
+if nargin < 11 || isempty(layerDepths), layerDepths = [1 1]; end
+validateattributes(layerDepths, {'numeric'}, ...
+    {'real','finite','positive','vector','numel',2});
 
 if strcmpi(modeType, 'SH')
     harmonicIndices = -n-1:n;
@@ -32,7 +38,7 @@ for harmonicPosition = 1:numel(harmonicIndices)
     % The exactly static harmonic has no velocity field.  Treat it
     % analytically because qDense=qLight=1 makes any four-exponential
     % representation linearly dependent.
-    if temporalIndex == 0 && strcmpi(modeType, 'H') && abs(sStar) == 0
+    if lambda == 0
         An(harmonicPosition) = 2*(gSign + ...
             betaStar^2*(1+At)/(2*Bd*At));
         continue;
@@ -42,7 +48,7 @@ for harmonicPosition = 1:numel(harmonicIndices)
     qLight = sqrt(1+lambda*densityRatio/(eta*C*betaStar^2));
     [denseFirstDerivative, denseThirdOverBetaSquared, ...
         lightThirdOverBetaSquared] = interface_derivatives( ...
-        lambda, betaStar, qDense, qLight, eta);
+        lambda, betaStar, qDense, qLight, eta, layerDepths);
 
     % From vertical and horizontal momentum,
     %   p = mu*w'''/beta^2-(rho*lambda/beta^2+mu)*w'.
@@ -60,23 +66,17 @@ end
 
 function [denseFirst, denseThirdOverBetaSquared, ...
     lightThirdOverBetaSquared] = interface_derivatives( ...
-    lambda, beta, qDense, qLight, eta)
-% Stable finite-depth basis.
-%
-% Dense layer, -1<=z<=0:
-%   exp(beta*z), exp(-beta*z), exp(qD*beta*z),
-%   exp(-qD*beta*(z+1)).
-% Light layer, 0<=z<=1:
-%   exp(beta*z), exp(-beta*z), exp(-qL*beta*z),
-%   exp(qL*beta*(z-1)).
-% Every basis value is bounded at the interface and its adjacent wall.
-
+    lambda, beta, qDense, qLight, eta, layerDepths)
+% Shift every growing exponential to its adjacent wall, so basis values
+% stay bounded at BOTH ends even for large beta or unequal depths.
+% "dense" and "light" below are legacy names for lower and upper fluid.
+hLower = layerDepths(1); hUpper = layerDepths(2);
 denseRates = beta*[1, -1, qDense, -qDense];
 lightRates = beta*[1, -1, -qLight, qLight];
-denseAtInterface = [1, 1, 1, exp(-qDense*beta)];
-denseAtBottom = [exp(-beta), exp(beta), exp(-qDense*beta), 1];
-lightAtInterface = [1, 1, 1, exp(-qLight*beta)];
-lightAtTop = [exp(beta), exp(-beta), exp(-qLight*beta), 1];
+denseAtInterface = [1, exp(-beta*hLower), 1, exp(-qDense*beta*hLower)];
+denseAtBottom = [exp(-beta*hLower), 1, exp(-qDense*beta*hLower), 1];
+lightAtInterface = [exp(-beta*hUpper), 1, 1, exp(-qLight*beta*hUpper)];
+lightAtTop = [1, exp(-beta*hUpper), exp(-qLight*beta*hUpper), 1];
 
 denseDerivativeAtInterface = denseRates.*denseAtInterface;
 lightDerivativeAtInterface = lightRates.*lightAtInterface;

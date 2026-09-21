@@ -1,6 +1,36 @@
 # Vibrated-Interface
 Multiphase interfacial dynamics in vibrated domains
 
+## Linear Floquet stability analysis
+
+Start with [`linear_floquet/examples/run_linear_floquet.m`](linear_floquet/examples/run_linear_floquet.m).
+It accepts SI fluid properties, two layer depths, 2D/3D Cartesian or 3D
+cylindrical geometry, vibration amplitude/frequency/acceleration phase, and
+one or more initial modal disturbances. It returns growth rates, multipliers,
+periodic Floquet coefficients, and time-dependent interface displacement,
+with plots and optional CSV/MAT output.
+
+```matlab
+run('linear_floquet/examples/run_linear_floquet.m')
+% Or:
+addpath('linear_floquet')
+cfg = vi_linear_defaults('cartesian3d');
+result = vi_linear_floquet(cfg);
+```
+
+See [`linear_floquet/README.md`](linear_floquet/README.md) for input units,
+spatial mode selection, the retained boundary conditions, numerical
+convergence checks, output dimensions, and tests. The initial disturbance
+amplitude and selected modes are required in addition to the material and
+forcing inputs. Forcing phase and disturbance phase are separate inputs.
+This is a linear Floquet-mode evolution, not an arbitrary initial-velocity
+solver or a nonlinear saturation model.
+
+The root-level reduced solvers remain available for compatibility with older
+scripts. Shared coefficients now also accept unequal layer depths; omitted
+depths retain the original equal-depth model. The new workflow is organized
+in `linear_floquet/`; generated run folders are ignored by Git.
+
 ## Weakly nonlinear analysis
 
 The `weakly_nonlinear` folder contains the MATLAB coefficient engine for
